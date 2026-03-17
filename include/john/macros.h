@@ -62,7 +62,7 @@
 		<< " line " << __LINE__ << ": <" << MSG << ">" << std::endl; \
       std::cerr.flush();						\
       exit( 1 );							\
-    } \ 
+    } \
 }
 
 
@@ -181,24 +181,24 @@ AIR VOL HELPERS
 // allocate data on the GPU memory, unpinned
 #define CUDALLOC_GPU( _TAB, _DIM, _DATATYPE )			\
   MSG_ASSERT(							\
-  cudaMalloc( (void**) &_TAB, _DIM * sizeof( _DATATYPE) ) \ 
+  cudaMalloc( (void**) &_TAB, _DIM * sizeof( _DATATYPE) ) \
 == cudaSuccess , "failed CUDALLOC" );
 
 // copy a CPU array to a GPU twin
 #define CUDAPUSH( _TAB_CPU, _TAB_GPU, _DIM, _DATATYPE )			\
   MSG_ASSERT(								\
-  cudaMemcpy( _TAB_GPU, _TAB_CPU, _DIM * sizeof( _DATATYPE), cudaMemcpyHostToDevice ) \ 
+  cudaMemcpy( _TAB_GPU, _TAB_CPU, _DIM * sizeof( _DATATYPE), cudaMemcpyHostToDevice ) \
 == cudaSuccess , "failed to push data to CUDA device");
 
 // copy back a GPU array to its CPU twin
 #define CUDAPULL( _TAB_CPU, _TAB_GPU, _DIM, _DATATYPE )			\
   MSG_ASSERT(								\
-  cudaMemcpy( _TAB_CPU, _TAB_GPU, _DIM * sizeof( _DATATYPE), cudaMemcpyDeviceToHost ) \ 
+  cudaMemcpy( _TAB_CPU, _TAB_GPU, _DIM * sizeof( _DATATYPE), cudaMemcpyDeviceToHost ) \
 == cudaSuccess , "failed to retrieve data from CUDA device"); 
 
 #define CUDACOPY( _TAB_GPU_S, _TAB_GPU_D, _DIM, _DATATYPE )		\
   MSG_ASSERT(								\
-  cudaMemcpy( _TAB_GPU_D, _TAB_GPU_S, _DIM * sizeof( _DATATYPE), cudaMemcpyDeviceToDevice ) \ 
+  cudaMemcpy( _TAB_GPU_D, _TAB_GPU_S, _DIM * sizeof( _DATATYPE), cudaMemcpyDeviceToDevice ) \
 == cudaSuccess , "failed to copy data inside CUDA device"); 
 
 
@@ -207,7 +207,7 @@ AIR VOL HELPERS
 // since the memory pinned will not be remapped
 #define CUDALLOC_HP( _TAB, _DIM, _DATATYPE )				\
   MSG_ASSERT(								\
-  cudaHostAlloc( (void**) &_TAB, _DIM * sizeof( _DATATYPE), cudaHostAllocDefault ) \ 
+  cudaHostAlloc( (void**) &_TAB, _DIM * sizeof( _DATATYPE), cudaHostAllocDefault ) \
 == cudaSuccess , "failed CUDALLOC for pinned mem" );				\
 
 
@@ -215,7 +215,7 @@ AIR VOL HELPERS
 // ie, implicit direct access from the GPU without CUDAPUSH
 #define CUDALLOC_ZC( _TAB, _DIM, _DATATYPE )				\
   MSG_ASSERT(								\
-  cudaHostAlloc( (void**) &_TAB, _DIM * sizeof( _DATATYPE), cudaHostAllocMapped ) \ 
+  cudaHostAlloc( (void**) &_TAB, _DIM * sizeof( _DATATYPE), cudaHostAllocMapped ) \
 == cudaSuccess , "failed " );				\
 
 
@@ -375,13 +375,17 @@ AIR VOL HELPERS
 
 
 /* return the minimum value of both expressions values*/
+#ifndef MIN
 #define MIN(EXP1, EXP2)				\
   (((EXP1) > (EXP2)) ? (EXP2) : (EXP1))
+#endif
 
 
 /* return the maximum value of both expressions values*/
+#ifndef MAX
 #define MAX(EXP1, EXP2)				\
   (((EXP1) > (EXP2)) ? (EXP1) : (EXP2))
+#endif
 
 /*
   #if defined(_MSC_VER) 
@@ -415,7 +419,7 @@ AIR VOL HELPERS
 *******************************************************************************/
 
 
-#define ARRAY_ALLOC(TAB, DIM, DATATYPE)		       \ 
+#define ARRAY_ALLOC(TAB, DIM, DATATYPE)		       \
 MSG_ASSERT(TAB = (DATATYPE *) calloc(DIM, sizeof(DATATYPE)),	\
 	   "failed array alloc" ); 
 
@@ -436,10 +440,10 @@ MSG_ASSERT(TAB = (DATATYPE *) calloc(DIM, sizeof(DATATYPE)),	\
 #include <sys/mman.h>
 */
 
-#define ARRAY_SSE_ALLOC(TAB, DIM, ALIGN, DATATYPE)		       \ 
+#define ARRAY_SSE_ALLOC(TAB, DIM, ALIGN, DATATYPE)		       \
 MSG_ASSERT(TAB = (DATATYPE *) _mm_malloc(DIM * sizeof(DATATYPE), ALIGN ), \
 	   "failed sse array alloc" );					\
-madvise(TAB, DIM * sizeof(DATATYPE), MADV_HUGEPAGE);			\ 
+madvise(TAB, DIM * sizeof(DATATYPE), MADV_HUGEPAGE);
 
 
 

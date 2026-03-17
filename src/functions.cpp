@@ -9,11 +9,11 @@ int clear_acquisition(string  rep, string chemin_config_manip,string chemin_reco
     const char * rep_c=rep.c_str();
     DIR *theFolder = opendir(rep_c);
     struct dirent *next_file;
-    char filepath[256];
+    char filepath[512];
 
     while ( (next_file = readdir(theFolder)) != NULL )
     {
-        sprintf(filepath, "%s/%s", rep_c, next_file->d_name);
+        snprintf(filepath, sizeof(filepath), "%s/%s", rep_c, next_file->d_name);
         if(filepath!=chemin_config_manip && filepath!=chemin_recon)
         remove(filepath);
     }
