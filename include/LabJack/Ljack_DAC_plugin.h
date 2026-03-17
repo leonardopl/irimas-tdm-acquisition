@@ -22,7 +22,7 @@ typedef struct dummy{
   uint8 bytesResponse[64];
   uint8 ackArray[4];
 
-  // infos relatives au labjack sur lequel le DAC est plugué
+  // info about the labjack hosting this DAC plugin
   HANDLE hDevice;
   u3TdacCalibrationInfo* caliInfo;
   
@@ -31,9 +31,9 @@ typedef struct dummy{
 
 
 
-/* Initialise la communication avec le plug DAC déjà calibré, 
-   et branché sur le LabJack au port plugin_port.
-   Valeurs possibles: 7 (ports FIO7/6), 5 (FIO5/4), 3 (AIN2/3), 1 (AIN0/1)
+/* Initialize communication with the already-calibrated DAC plugin,
+   connected to the LabJack at plugin_port.
+   Possible values: 7 (ports FIO7/6), 5 (FIO5/4), 3 (AIN2/3), 1 (AIN0/1)
 */
 void 
 Ljack_DAC_com_init(Ljack_DAC_plugin* DAC, HANDLE hDevice, u3TdacCalibrationInfo* caliInfo, unsigned int plugin_port);

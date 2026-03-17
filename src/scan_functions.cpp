@@ -6,7 +6,7 @@
 using namespace std;
 
 // Rose (rhodonea) curve: update voltage for next point
-float2D maj_fleur(float rho, int nbHolo, float *theta)
+float2D update_rose(float rho, int nbHolo, float *theta)
 {
     float2D Vout={0,0};
     float t=*theta; // current polar angle
@@ -19,7 +19,7 @@ float2D maj_fleur(float rho, int nbHolo, float *theta)
 }
 
 // Rose (rhodonea) curve: fill voltage table
-void scan_fleur(float rho, int nbHolo, std::vector<float2D> &Vout_table)
+void scan_rose(float rho, int nbHolo, std::vector<float2D> &Vout_table)
 {
     double theta=0; // polar angle
     double delta_theta=2*M_PI/nbHolo;
@@ -72,10 +72,10 @@ void scan_annular(float Vmax, float nb_circle, int nbHolo, std::vector<float2D> 
             double delta_theta=2*M_PI/nbPoint;
             cout<<"rho_voltage="<<rho_voltage[numCircle]<<endl;
 
-            for(int cpt=0; cpt<nbPoint; cpt++)
+            for(int i=0; i<nbPoint; i++)
                 {
-                    Vout_table[numHolo].x=rho_voltage[numCircle]*cos(delta_theta*cpt);
-                    Vout_table[numHolo].y=rho_voltage[numCircle]*sin(delta_theta*cpt);
+                    Vout_table[numHolo].x=rho_voltage[numCircle]*cos(delta_theta*i);
+                    Vout_table[numHolo].y=rho_voltage[numCircle]*sin(delta_theta*i);
                     if(pow(Vmax,2)-pow(Vout_table[numHolo].x,2)-pow(Vout_table[numHolo].y,2)>0)
                     kiz[numHolo]=sqrt(pow(Vmax,2)-pow(Vout_table[numHolo].x,2)-pow(Vout_table[numHolo].y,2));
                     else{
@@ -94,7 +94,7 @@ void scan_fermat(double Vmax, int nbHolo, std::vector<float2D> &Vout_table, Var2
     double angle_dor=(3*sqrt(5))*M_PI; // golden angle
     double delta_theta=theta_max/nbHolo;
     cout<<"delta_theta="<<delta_theta<<endl;
-    vector<double> centre(dim.x*dim.y);
+    vector<double> center(dim.x*dim.y);
     double nbPixVolt=(dim.x/(2*Vmax));
     Var2D spec={0,0},specI={0,0};
 
@@ -106,18 +106,18 @@ void scan_fermat(double Vmax, int nbHolo, std::vector<float2D> &Vout_table, Var2
     spec.y=round(Vout_table[numHolo].y*nbPixVolt);
     specI.x=spec.x+dim.x/2;
     specI.y=spec.y+dim.y/2;
-    centre[specI.y*dim.x+specI.x]=numHolo;
+    center[specI.y*dim.x+specI.x]=numHolo;
 
     theta=theta+delta_theta;
     }
     // Reorder points to minimize mirror jumps (zigzag raster scan)
     int numHolo=0;
     int x=0,y=0;
-    for(int cpt=0; cpt<dim.x*dim.y; cpt++){
-        y=cpt/dim.x;
-        if(y%2==0) x=dim.x-cpt%dim.x; // even rows: decreasing x
-        else x=cpt%dim.x;              // odd rows: increasing x
-        if(centre[y*dim.x+x]!=0){
+    for(int i=0; i<dim.x*dim.y; i++){
+        y=i/dim.x;
+        if(y%2==0) x=dim.x-i%dim.x; // even rows: decreasing x
+        else x=i%dim.x;              // odd rows: increasing x
+        if(center[y*dim.x+x]!=0){
             Vout_table[numHolo].x=x/nbPixVolt-Vmax;
             Vout_table[numHolo].y=y/nbPixVolt-Vmax;
             numHolo++;
@@ -131,7 +131,7 @@ void scan_random_cartesian(double Vmax, int nbHolo, std::vector<float2D> &Vout_t
     double const nbPixVolt=(dim.x/(2*Vmax));
     srand (time(NULL));
     double nbAleaX=0, nbAleaY=0;
-    vector<double> centre(dim.x*dim.y);
+    vector<double> center(dim.x*dim.y);
     int numHolo=0;
     while(numHolo<nbHolo){
         nbAleaX=Vmax*(2*rand()/(double)RAND_MAX)-1;
@@ -149,14 +149,14 @@ void scan_random_cartesian(double Vmax, int nbHolo, std::vector<float2D> &Vout_t
         spec.y=round(Vout_table[numHolo].y*nbPixVolt);
         specI.x=spec.x+dim.x/2;
         specI.y=spec.y+dim.y/2;
-        centre[specI.y*dim.x+specI.x]=1;
+        center[specI.y*dim.x+specI.x]=1;
     }
     // Reorder to minimize mirror jumps (zigzag raster)
      numHolo=0;
     // Scan even rows with increasing x
     for( int y=0; y<dim.y; y=y+2){
         for(int x=0; x<dim.x; x++){
-            if(centre[y*dim.x+x]==1){
+            if(center[y*dim.x+x]==1){
                 Vout_table[numHolo].x=x/nbPixVolt-Vmax;
                 Vout_table[numHolo].y=y/nbPixVolt-Vmax;
                 numHolo++;
@@ -166,7 +166,7 @@ void scan_random_cartesian(double Vmax, int nbHolo, std::vector<float2D> &Vout_t
     // Scan odd rows with decreasing x
     for( int y=1; y<dim.y; y=y+2){
         for(int x=dim.x; x<dim.x; x--){
-            if(centre[y*dim.x+x]==1){
+            if(center[y*dim.x+x]==1){
                 Vout_table[numHolo].x=x/nbPixVolt-Vmax;
                 Vout_table[numHolo].y=y/nbPixVolt-Vmax;
                 numHolo++;
@@ -181,7 +181,7 @@ void scan_random_polar3D(double Vmax, int nbHolo, std::vector<float2D> &Vout_tab
     double const nbPixVolt=(dim.x/(2*Vmax));
     srand (time(NULL));
     double nbAleaPhi=0, nbAleaTheta=0;
-    vector<int> centre(dim.x*dim.y);
+    vector<int> center(dim.x*dim.y);
     int numHolo=0;
     // Generate unique random voltages and place on integer grid
     while(numHolo<nbHolo)
@@ -193,9 +193,9 @@ void scan_random_polar3D(double Vmax, int nbHolo, std::vector<float2D> &Vout_tab
 
         int x=round((Vout_table[numHolo].x+Vmax)*nbPixVolt);
         int y=round((Vout_table[numHolo].y+Vmax)*nbPixVolt);
-        if(centre[y*dim.x+x]!=1) // ensure uniqueness
+        if(center[y*dim.x+x]!=1) // ensure uniqueness
         {
-        centre[y*dim.x+x]=1;
+        center[y*dim.x+x]=1;
         numHolo++;
         }
     }
@@ -205,7 +205,7 @@ void scan_random_polar3D(double Vmax, int nbHolo, std::vector<float2D> &Vout_tab
         if(y%2==0) // even rows: increasing x
         {
             for( int x=0; x<dim.x; x++){
-                if(centre[y*dim.x+x]==1){
+                if(center[y*dim.x+x]==1){
                     Vout_table[numHolo].x=x/nbPixVolt-Vmax;
                     Vout_table[numHolo].y=y/nbPixVolt-Vmax;
                     numHolo++;
@@ -215,7 +215,7 @@ void scan_random_polar3D(double Vmax, int nbHolo, std::vector<float2D> &Vout_tab
         else // odd rows: decreasing x
         {
             for (int x=dim.x-1;x>=0;x--){
-                if(centre[y*dim.x+x]==1){
+                if(center[y*dim.x+x]==1){
                 Vout_table[numHolo].x=x/nbPixVolt-Vmax;
                 Vout_table[numHolo].y=y/nbPixVolt-Vmax;
                 numHolo++;
@@ -226,7 +226,7 @@ void scan_random_polar3D(double Vmax, int nbHolo, std::vector<float2D> &Vout_tab
 }
 
 // Archimedean spiral: single-point update
-float2D maj_spiral(float rho, int nbHolo, float *theta)
+float2D update_spiral(float rho, int nbHolo, float *theta)
 {
     float2D Vout={0,0};
     double numbTurn=10;
@@ -283,31 +283,31 @@ void scan_spiral(double Vmax, int nbHolo, std::vector<float2D> &Vout_table, Var2
 // Uniform spherical sampling projected to 2D voltages
 void scan_uniform3D(double Vmax, int nbHolo, std::vector<float2D> &Vout_table)
 {
-    double surface_moyenne_pt=2*M_PI/nbHolo;
-    double distance_moyenne=sqrt(surface_moyenne_pt);
+    double avg_surface_per_pt=2*M_PI/nbHolo;
+    double avg_distance=sqrt(avg_surface_per_pt);
     vector<double> kiz(nbHolo);
-    cout<<"mean distance="<<distance_moyenne<<endl;
+    cout<<"mean distance="<<avg_distance<<endl;
 
     double theta_max=M_PI/2,theta_min=0;
-    int nbCercle=round((theta_max-theta_min)/distance_moyenne); // number of concentric circles
-    cout<<"total circles="<<nbCercle<<endl;
-    double delta_theta=(theta_max-theta_min)/nbCercle;
+    int num_circles=round((theta_max-theta_min)/avg_distance); // number of concentric circles
+    cout<<"total circles="<<num_circles<<endl;
+    double delta_theta=(theta_max-theta_min)/num_circles;
     double theta=0,phi=0,delta_curv_phi=0;
     int numHolo=0;
     double total_circle_length=0;
-    for(int num_cercle=0;num_cercle<nbCercle;num_cercle++){
-        theta=(num_cercle)*delta_theta;
-        delta_curv_phi=surface_moyenne_pt/delta_theta;
+    for(int circle_idx=0;circle_idx<num_circles;circle_idx++){
+        theta=(circle_idx)*delta_theta;
+        delta_curv_phi=avg_surface_per_pt/delta_theta;
         total_circle_length=total_circle_length+2*M_PI*sin(theta);
     }
     double dist_recalc=total_circle_length/nbHolo;
 
-    for(int num_cercle=0;num_cercle<nbCercle;num_cercle++){
-        theta=(num_cercle)*delta_theta;
+    for(int circle_idx=0;circle_idx<num_circles;circle_idx++){
+        theta=(circle_idx)*delta_theta;
         delta_curv_phi=dist_recalc; // arc-length step on concentric circle
-        int nbPtPhi=round(2*M_PI*sin(theta)/(delta_curv_phi)); // points on this circle
-        for(int numPt=0;numPt<nbPtPhi;numPt++){
-            phi=2*M_PI*(numPt)/nbPtPhi;
+        int num_pts_phi=round(2*M_PI*sin(theta)/(delta_curv_phi)); // points on this circle
+        for(int numPt=0;numPt<num_pts_phi;numPt++){
+            phi=2*M_PI*(numPt)/num_pts_phi;
             Vout_table[numHolo].x=Vmax*sin(theta)*cos(phi);
             Vout_table[numHolo].y=Vmax*sin(theta)*sin(phi);
             kiz[numHolo]=Vmax*cos(theta);
@@ -317,28 +317,28 @@ void scan_uniform3D(double Vmax, int nbHolo, std::vector<float2D> &Vout_table)
 }
 
 // Star pattern: radial axes through the origin
-void scan_etoile(double Vmax, int nbHolo, int nbAxe, vector<float2D> &Vout_table)
+void scan_star(double Vmax, int nbHolo, int nbAxe, vector<float2D> &Vout_table)
 {
 double delta_theta=M_PI/nbAxe;
-int nbPtAxe=floor((double)nbHolo/(double)nbAxe);
+int pts_per_axis=floor((double)nbHolo/(double)nbAxe);
 vector<double> kiz(nbHolo);
-vector<int> nbPointAxe(nbAxe);
+vector<int> axis_point_count(nbAxe);
 int numHolo=0;
-int nbPtLeft=nbHolo-(nbPtAxe*nbAxe); // remainder points
+int nbPtLeft=nbHolo-(pts_per_axis*nbAxe); // remainder points
 vector<double> theta(nbAxe);
-for(int cpt=0;cpt<nbAxe;cpt++){
-theta[cpt]=cpt*delta_theta;
-if(cpt>=(nbAxe-nbPtLeft)) // distribute remainder across last axes
-    nbPointAxe[cpt]=nbPtAxe+1;
-else nbPointAxe[cpt]=nbPtAxe;
+for(int i=0;i<nbAxe;i++){
+theta[i]=i*delta_theta;
+if(i>=(nbAxe-nbPtLeft)) // distribute remainder across last axes
+    axis_point_count[i]=pts_per_axis+1;
+else axis_point_count[i]=pts_per_axis;
 }
-for(int cpt=0;cpt<nbAxe;cpt++){
-    double delta_rho=2*Vmax/nbPointAxe[cpt];
+for(int i=0;i<nbAxe;i++){
+    double delta_rho=2*Vmax/axis_point_count[i];
     double rho=0;
-    for(int numPt=0; numPt<nbPointAxe[cpt];numPt++){
+    for(int numPt=0; numPt<axis_point_count[i];numPt++){
         rho=-Vmax+numPt*delta_rho; // sweep radius at fixed theta
-        Vout_table[numHolo].x=rho*cos(theta[cpt]);
-        Vout_table[numHolo].y=rho*sin(theta[cpt]);
+        Vout_table[numHolo].x=rho*cos(theta[i]);
+        Vout_table[numHolo].y=rho*sin(theta[i]);
         kiz[numHolo]=sqrt(Vmax*Vmax-pow(Vout_table[numHolo].x,2)-pow(Vout_table[numHolo].y,2));
         numHolo++;
     }
