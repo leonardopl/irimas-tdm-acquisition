@@ -28,7 +28,7 @@ LDFLAGS = -L/opt/lib_tomo/labjack \
           -lLjack -llabjackusb -llabjackusbcpp -lmsleep
 
 TARGET = $(BINDIR)/tdm_acquisition
-OBJS   = $(OBJDIR)/main.o $(OBJDIR)/fonctions.o $(OBJDIR)/scan_functions.o
+OBJS   = $(OBJDIR)/main.o $(OBJDIR)/functions.o $(OBJDIR)/scan_functions.o
 
 $(TARGET): $(OBJS) | $(BINDIR)
 	$(CXX) -o $@ $^ $(LDFLAGS)
@@ -36,7 +36,7 @@ $(TARGET): $(OBJS) | $(BINDIR)
 $(OBJDIR)/main.o: main.cpp | $(OBJDIR)
 	$(CXX) -c $< $(CXXFLAGS) -o $@
 
-$(OBJDIR)/fonctions.o: src/fonctions.cpp | $(OBJDIR)
+$(OBJDIR)/functions.o: src/functions.cpp | $(OBJDIR)
 	$(CXX) -c $< $(CXXFLAGS) -o $@
 
 $(OBJDIR)/scan_functions.o: src/scan_functions.cpp | $(OBJDIR)

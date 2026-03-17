@@ -1,4 +1,4 @@
-#include "fonctions.h"
+#include "functions.h"
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>

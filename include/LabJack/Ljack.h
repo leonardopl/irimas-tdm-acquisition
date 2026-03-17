@@ -32,13 +32,13 @@ class Ljack{
 
   HANDLE hDevice;
   bool *occupied_ports;
-  // Valeurs possibles: 7 (ports FIO7/6), 5 (FIO5/4), 3 (AIN2/3), 1 (AIN0/1)
+  // Possible values: 7 (ports FIO7/6), 5 (FIO5/4), 3 (AIN2/3), 1 (AIN0/1)
   
  public:
 
   // simulation
   bool simulate_p;
-  size_t latency_microsecs; // utile pour simuler l'attente du labjack
+  size_t latency_microsecs; // useful for simulating labjack wait
 
 
  public:

@@ -5,7 +5,7 @@
 #include "msleep.h"
 
 #include "Ljack.h"
-// provisoire
+// provisional
 #include "Ljack_DAC_plugin.h"
 
 
@@ -33,7 +33,7 @@ class Ljack_DAC {
 
   // simulation
   bool simulate_p;
-  size_t latency_microsecs; // utile pour simuler l'attente du labjack
+  size_t latency_microsecs; // useful for simulating labjack wait
 
 
  public:
@@ -49,7 +49,7 @@ class Ljack_DAC {
       if (! simulate_p)
 	{
 	  MSG_ASSERT(configIO_DAC(host_handle) == 0, \
-		     "échec config DAC");
+		     "DAC config failure");
 	}
       else
 	latency_microsecs = host_labjack.latency_microsecs;

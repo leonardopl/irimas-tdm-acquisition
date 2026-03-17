@@ -1,10 +1,10 @@
-#include "fonctions.h"
+#include "functions.h"
 #include <tiffio.h>
 #include <dirent.h>
 #include <chrono>
 #define PI 3.14159
 
-int efface_acquis(string  rep, string chemin_config_manip,string chemin_recon)
+int clear_acquisition(string  rep, string chemin_config_manip,string chemin_recon)
 {
     const char * rep_c=rep.c_str();
     DIR *theFolder = opendir(rep_c);
@@ -22,9 +22,9 @@ int efface_acquis(string  rep, string chemin_config_manip,string chemin_recon)
 }
 
 // Extract a string value for the given key from a config file
-string extract_string(std::string token,  std::string chemin_fic)
+string extract_string(std::string token,  std::string file_path)
 {
-    ifstream file(chemin_fic.c_str(), ios::in);
+    ifstream file(file_path.c_str(), ios::in);
     string line, keyword, value_str, separator=" ";
     string value;
     vector<std::string> tokens;
@@ -38,31 +38,31 @@ string extract_string(std::string token,  std::string chemin_fic)
         }
     }
     else
-        cerr << "Cannot open file: "<< chemin_fic<< endl;
+        cerr << "Cannot open file: "<< file_path<< endl;
 
-    int nb_tok=tokens.size();
-    for(int cpt=0;cpt<nb_tok;cpt++){
-        line=tokens[cpt];
+    int num_tokens=tokens.size();
+    for(int i=0;i<num_tokens;i++){
+        line=tokens[i];
         if(line!=""){
-            int pos_separ=line.find(separator);
-            int long_separ=separator.length();
-            keyword = line.substr(0, pos_separ);
+            int sep_pos=line.find(separator);
+            int sep_len=separator.length();
+            keyword = line.substr(0, sep_pos);
             if(keyword==token){
-            value_str=line.substr(pos_separ+long_separ,line.size()-(keyword.size()+long_separ));
+            value_str=line.substr(sep_pos+sep_len,line.size()-(keyword.size()+sep_len));
             cout<<keyword<<"="<<value_str<<endl;
             value=value_str.c_str();
             }
         }
     }
     if(value.empty())
-        cout<<"Key "<<token<<" not found in file "<<chemin_fic<<endl;
+        cout<<"Key "<<token<<" not found in file "<<file_path<<endl;
     file.close();
     return value;
 }
 
-float extract_val(string token,  string chemin_fic)
+float extract_val(string token,  string file_path)
 {
-    ifstream file(chemin_fic.c_str(), ios::in);
+    ifstream file(file_path.c_str(), ios::in);
     string line, keyword, value_str, separator=" ";
     float value=0;
     vector<std::string> tokens;
@@ -76,17 +76,17 @@ float extract_val(string token,  string chemin_fic)
         }
     }
     else
-        cerr << "Cannot open file: "<< chemin_fic<< endl;
+        cerr << "Cannot open file: "<< file_path<< endl;
 
-    int nb_tok=tokens.size();
-    for(int cpt=0;cpt<nb_tok;cpt++){
-        line=tokens[cpt];
+    int num_tokens=tokens.size();
+    for(int i=0;i<num_tokens;i++){
+        line=tokens[i];
         if(line!=""){
-            int pos_separ=line.find(separator);
-            int long_separ=separator.length();
-            keyword = line.substr(0, pos_separ);
+            int sep_pos=line.find(separator);
+            int sep_len=separator.length();
+            keyword = line.substr(0, sep_pos);
             if(keyword==token){
-            value_str=line.substr(pos_separ+long_separ,line.size()-(keyword.size()+long_separ));
+            value_str=line.substr(sep_pos+sep_len,line.size()-(keyword.size()+sep_len));
             cout<<keyword<<"="<<value_str<<endl;
             value=atof(value_str.c_str());
             }
@@ -97,29 +97,29 @@ float extract_val(string token,  string chemin_fic)
 }
 
 
-float ecrire_val(string token, float valeur_token, string chemin_fic)
+float write_val(string token, float token_value, string file_path)
 {
      // Backup the file first
-     ifstream src(chemin_fic.c_str() ,ios::binary);
-     ofstream dst(chemin_fic+"_SAV" ,ios::binary);
+     ifstream src(file_path.c_str() ,ios::binary);
+     ofstream dst(file_path+"_SAV" ,ios::binary);
      dst<<src.rdbuf();
      src.close();
      dst.close();
 
      string line, keyword, value_str, new_line, string_val_token, separator=" ";
      std::ostringstream ss;
-     ifstream file_stream(chemin_fic.c_str(), ios::in);
+     ifstream file_stream(file_path.c_str(), ios::in);
      vector<std::string> file_buffer;
      if(file_stream)
      {    while(!file_stream.eof()){
             getline(file_stream,line,'\n');
             if(line[0]!='#') // not a comment line
             {
-                int pos_separ=line.find(separator);
-                int long_separ=separator.length();
-                keyword = line.substr(0, pos_separ);
+                int sep_pos=line.find(separator);
+                int sep_len=separator.length();
+                keyword = line.substr(0, sep_pos);
                 if(keyword==token){
-                ss << valeur_token;
+                ss << token_value;
                 string_val_token=ss.str();
                 new_line=token+" "+string_val_token;
                 file_buffer.push_back(new_line);
@@ -133,11 +133,11 @@ float ecrire_val(string token, float valeur_token, string chemin_fic)
         }
      }
      else
-            cerr << "Error opening file: "<<chemin_fic << endl;
+            cerr << "Error opening file: "<<file_path << endl;
     file_stream.close();
-    ofstream write_stream(chemin_fic.c_str(), ios::out);
-    for(int cpt=0;cpt<file_buffer.size();cpt++)
-    write_stream<<file_buffer[cpt]<<endl;
+    ofstream write_stream(file_path.c_str(), ios::out);
+    for(int i=0;i<file_buffer.size();i++)
+    write_stream<<file_buffer[i]<<endl;
     write_stream.close();
      return 0;
 }

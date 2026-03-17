@@ -29,7 +29,7 @@ using namespace GenApi;
 #include <termios.h>
 #include <fcntl.h>
 
-#include "fonctions.h"
+#include "functions.h"
 #include "scan_functions.h"
 
 #include <list>
@@ -46,7 +46,7 @@ CInstantCamera* SelectAndConnectCamera();
 void ConfigureCamera(CInstantCamera* camera, int dimROI);
 void AcquireImages(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt, string result_path,
                    string acquis_path, int dimROI, vector<float2D> &Vout_table);
-void AcquireIntensiteRef(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt,
+void AcquireIntensityRef(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt,
                          string result_path, string acquis_path, int dimROI);
 string IntToString(int number);
 
@@ -71,9 +71,9 @@ int main(int argc, char *argv[])
     int dimROI = extract_val("DIM_ROI", manip_config_path);
     int NXMAX = extract_val("NXMAX", manip_config_path);
 
-    string repAcquis = acquis_path;
-    Var2D dimHolo = {2*NXMAX, 2*NXMAX};
-    efface_acquis(repAcquis, manip_config_path, recon_path);
+    string acquis_dir = acquis_path;
+    Var2D holo_dim = {2*NXMAX, 2*NXMAX};
+    clear_acquisition(acquis_dir, manip_config_path, recon_path);
 
     // Extract configuration parameters
     MAX_IMAGES = extract_val("NB_HOLO", manip_config_path);
@@ -112,13 +112,13 @@ int main(int argc, char *argv[])
     vector<float2D> Vout_table(nbHolo);
     bool scan_pattern_exist = 0;
 
-    if(scan_pattern_str == "ROSACE") { scan_fleur(rho, nbHolo, Vout_table); scan_pattern_exist = 1; }
-    if(scan_pattern_str == "FERMAT") { scan_fermat(rho, nbHolo, Vout_table, dimHolo); scan_pattern_exist = 1; }
+    if(scan_pattern_str == "ROSACE") { scan_rose(rho, nbHolo, Vout_table); scan_pattern_exist = 1; }
+    if(scan_pattern_str == "FERMAT") { scan_fermat(rho, nbHolo, Vout_table, holo_dim); scan_pattern_exist = 1; }
     if(scan_pattern_str == "ARCHIMEDE") { scan_spiralOS(rho, nbHolo, Vout_table, 4); scan_pattern_exist = 1; }
     if(scan_pattern_str == "ANNULAR") { scan_annular(rho, NbCirclesAnnular, nbHolo, Vout_table); scan_pattern_exist = 1; }
     if(scan_pattern_str == "UNIFORM3D") { scan_uniform3D(rho, nbHolo, Vout_table); scan_pattern_exist = 1; }
-    if(scan_pattern_str == "RANDOM_POLAR") { scan_random_polar3D(rho, nbHolo, Vout_table, dimHolo); scan_pattern_exist = 1; }
-    if(scan_pattern_str == "STAR") { scan_etoile(rho, nbHolo, 3, Vout_table); scan_pattern_exist = 1; }
+    if(scan_pattern_str == "RANDOM_POLAR") { scan_random_polar3D(rho, nbHolo, Vout_table, holo_dim); scan_pattern_exist = 1; }
+    if(scan_pattern_str == "STAR") { scan_star(rho, nbHolo, 3, Vout_table); scan_pattern_exist = 1; }
 
     cout << "scan_pattern_exist=" << scan_pattern_exist << endl;
     if(scan_pattern_exist == 0)
@@ -144,7 +144,7 @@ int main(int argc, char *argv[])
 
             // Acquire reference intensity if needed
             if(b_AmpliRef == 1)
-                AcquireIntensiteRef(camera, &ljDAC_flower, result_path, acquis_path, dimROI);
+                AcquireIntensityRef(camera, &ljDAC_flower, result_path, acquis_path, dimROI);
 
             cout << "Closing camera" << endl;
             camera->Close();
@@ -419,7 +419,7 @@ void AcquireImages(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt, string result
 }
 
 // Acquire reference intensity image
-void AcquireIntensiteRef(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt,
+void AcquireIntensityRef(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt,
                          string result_path, string acquis_path, int dimROI)
 {
     // Set reference voltages
