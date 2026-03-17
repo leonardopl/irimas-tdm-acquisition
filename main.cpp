@@ -28,6 +28,7 @@ using namespace GenApi;
 #include <assert.h>
 #include <termios.h>
 #include <fcntl.h>
+#include <signal.h>
 
 #include "functions.h"
 #include "scan_functions.h"
@@ -40,6 +41,21 @@ float2D VfOffset = {0, 0};
 unsigned int b_AmpliRef = 0;
 float NAcondLim = 1; // condenser NA scanning limit coefficient, 0 < value <= 1
 size_t MAX_IMAGES = 0;
+
+// Global pointer for SIGINT cleanup
+static Ljack_DAC* g_DAC_ptr = NULL;
+
+void sigint_handler(int sig)
+{
+    cout << "\nSIGINT received, resetting DAC and shutting down..." << endl;
+    if (g_DAC_ptr != NULL)
+    {
+        g_DAC_ptr->set_A_output(0.0);
+        g_DAC_ptr->set_B_output(0.0);
+    }
+    PylonTerminate();
+    exit(1);
+}
 
 // Function Prototypes
 CInstantCamera* SelectAndConnectCamera();
@@ -101,6 +117,10 @@ int main(int argc, char *argv[])
 
     ljDAC_flower.set_A_output(VfOffset.x);
     ljDAC_flower.set_B_output(VfOffset.y);
+
+    // Install SIGINT handler for clean DAC shutdown
+    g_DAC_ptr = &ljDAC_flower;
+    signal(SIGINT, sigint_handler);
 
     // Generate voltage lookup table for scan pattern
     string scan_pattern_str = extract_string("SCAN_PATTERN", manip_config_path);
