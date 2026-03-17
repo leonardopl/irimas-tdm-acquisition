@@ -1,0 +1,18 @@
+# Build artifacts
+obj/
+bin/
+*.o
+
+# IDE files
+.vscode/
+.idea/
+*.cbp
+*.depend
+*.layout
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
