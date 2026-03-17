@@ -4,7 +4,7 @@ Hologram acquisition software for Tomographic Diffraction Microscopy (TDM).
 Controls a Basler camera and LabJack U3-HV DAC for automated beam steering
 during off-axis holographic tomography experiments.
 
-Developed at IRIMAS, Universite de Haute-Alsace.
+Adapted from the acquisition module of [MTD_transmission](https://github.com/madeba/MTD_transmission) by Matthieu Debailleul (IRIMAS, Université de Haute-Alsace). Ported from the Pleora eBUS SDK to the Basler Pylon SDK.
 
 ## Hardware
 
@@ -66,7 +66,3 @@ Acquisition parameters in `config_manip.txt`:
 # or
 ./run.sh
 ```
-
-## License
-
-[TBD]
