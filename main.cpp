@@ -365,7 +365,7 @@ void AcquireImages(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt, string result
                     formatConverter.Convert(pylonImage, ptrGrabResult);
                     cv::Mat lframe(ptrGrabResult->GetHeight(), ptrGrabResult->GetWidth(), CV_8UC1, (uint8_t*)pylonImage.GetBuffer());
 
-                    imwrite(acquis_path + format("/i%03d.pgm", img_count), lframe);
+                    imwrite(acquis_path + format("/i%03zu.pgm", img_count), lframe);
 
                     // Update mirrors (DAC) for next image
                     Vscan.x = Vout_table[img_count].x;
