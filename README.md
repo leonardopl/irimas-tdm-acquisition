@@ -6,6 +6,17 @@ during off-axis holographic tomography experiments.
 
 Adapted from the acquisition module of [MTD_transmission](https://github.com/madeba/MTD_transmission) by Matthieu Debailleul (IRIMAS, Université de Haute-Alsace). Ported from the Pleora eBUS SDK to the Basler Pylon SDK.
 
+## Changes from upstream
+
+Key differences from the original [MTD_transmission](https://github.com/madeba/MTD_transmission) acquisition module:
+
+- **SDK migration**: Replaced Pleora eBUS SDK with Basler Pylon SDK; camera selection changed from GUI dialog to CLI menu
+- **DAC settling fix**: Reference acquisition now waits for DAC settling (100 ms) before image capture, rather than after
+- **Explicit pixel format**: Camera is configured to Mono8, removing reliance on device defaults
+- **SIGINT handling**: Added signal handler to reset DAC outputs on interrupt (Ctrl+C)
+- **Error handling**: Structured exception handling with proper camera and Pylon cleanup on failure
+- **Codebase cleanup**: Translated from French to English; removed unused functions and dead code
+
 ## Hardware
 
 - Basler area-scan camera (GigE or USB3)
