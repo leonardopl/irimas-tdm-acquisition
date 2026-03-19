@@ -10,9 +10,13 @@ using namespace std;
 #include <string>
 #include <sstream>
 
-// Basler Pylon API
-#include <pylon/PylonIncludes.h>
-using namespace Pylon;
+// rc_genicam_api
+#include <rc_genicam_api/system.h>
+#include <rc_genicam_api/interface.h>
+#include <rc_genicam_api/device.h>
+#include <rc_genicam_api/stream.h>
+#include <rc_genicam_api/buffer.h>
+#include <rc_genicam_api/config.h>
 using namespace GenApi;
 
 #include "Ljack.h"
@@ -53,25 +57,26 @@ void sigint_handler(int sig)
         g_DAC_ptr->set_A_output(0.0);
         g_DAC_ptr->set_B_output(0.0);
     }
-    PylonTerminate();
+    rcg::System::clearSystems();
     exit(1);
 }
 
 // Function Prototypes
-CInstantCamera* SelectAndConnectCamera();
-void ConfigureCamera(CInstantCamera* camera, int dimROI);
-void AcquireImages(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt, string result_path,
+std::shared_ptr<rcg::Device> SelectAndConnectCamera();
+void ConfigureCamera(std::shared_ptr<rcg::Device> device, int dimROI);
+void AcquireImages(std::shared_ptr<rcg::Device> device, std::shared_ptr<rcg::Stream> stream,
+                   Ljack_DAC *DAC_tiptilt,
                    string acquis_path, int dimROI, vector<float2D> &Vout_table);
-void AcquireIntensityRef(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt,
-                         string result_path, string acquis_path, int dimROI);
-string IntToString(int number);
+void AcquireIntensityRef(std::shared_ptr<rcg::Device> device, std::shared_ptr<rcg::Stream> stream,
+                         Ljack_DAC *DAC_tiptilt,
+                         string acquis_path, int dimROI);
 
 int main(int argc, char *argv[])
 {
     cout << "########################## ACQUISITION ##################################" << endl;
 
     // Initialize paths and configuration
-    string gui_config_path, recon_path, manip_config_path, acquis_path, result_path, config_dir;
+    string gui_config_path, recon_path, manip_config_path, acquis_path, config_dir;
     string home = getenv("HOME");
     string gui_tomo_suffix = "/.config/gui_tomo.conf";
     gui_config_path = getenv("HOME") + gui_tomo_suffix;
@@ -79,7 +84,6 @@ int main(int argc, char *argv[])
 
     config_dir = extract_string("CHEMIN_CONFIG", home + gui_tomo_suffix);
     acquis_path = extract_string("CHEMIN_ACQUIS", home + gui_tomo_suffix);
-    result_path = extract_string("CHEMIN_RESULT", home + gui_tomo_suffix);
     recon_path = config_dir + "/recon.txt";
     manip_config_path = config_dir + "/config_manip.txt";
     cout << "Config file: " << manip_config_path << endl;
@@ -144,63 +148,57 @@ int main(int argc, char *argv[])
     if(scan_pattern_exist == 0)
         cout << "Cannot handle this scan pattern" << endl;
 
-    // Initialize Pylon runtime
-    PylonInitialize();
-
-    CInstantCamera* camera = NULL;
+    std::shared_ptr<rcg::Device> device;
+    std::shared_ptr<rcg::Stream> stream;
 
     try
     {
-        cout << "Basler Pylon Camera Acquisition:" << endl << endl;
+        cout << "GenICam Camera Acquisition:" << endl << endl;
 
-        camera = SelectAndConnectCamera();
+        device = SelectAndConnectCamera();
 
-        if (camera != NULL && camera->IsOpen())
+        if (device)
         {
-            ConfigureCamera(camera, dimROI);
+            // Open the first available stream
+            std::vector<std::shared_ptr<rcg::Stream>> streams = device->getStreams();
+            if (streams.empty())
+            {
+                cout << "No streams available on device" << endl;
+                device->close();
+                rcg::System::clearSystems();
+                return -1;
+            }
+            stream = streams[0];
+            stream->open();
+
+            ConfigureCamera(device, dimROI);
 
             // Acquire hologram images
-            AcquireImages(camera, &ljDAC_flower, result_path, acquis_path, dimROI, Vout_table);
+            AcquireImages(device, stream, &ljDAC_flower, acquis_path, dimROI, Vout_table);
 
             // Acquire reference intensity if needed
             if(b_AmpliRef == 1)
-                AcquireIntensityRef(camera, &ljDAC_flower, result_path, acquis_path, dimROI);
+                AcquireIntensityRef(device, stream, &ljDAC_flower, acquis_path, dimROI);
 
             cout << "Closing camera" << endl;
-            camera->Close();
-            delete camera;
+            stream->close();
+            device->close();
         }
         else
         {
             cout << "No camera connected" << endl;
         }
     }
-    catch (const GenericException &e)
-    {
-        cout << "Pylon Exception: " << e.GetDescription() << endl;
-        if (camera != NULL)
-        {
-            if (camera->IsOpen())
-                camera->Close();
-            delete camera;
-        }
-        PylonTerminate();
-        return -1;
-    }
     catch (exception& e)
     {
         cout << "Exception: " << e.what() << endl;
-        if (camera != NULL)
-        {
-            if (camera->IsOpen())
-                camera->Close();
-            delete camera;
-        }
-        PylonTerminate();
+        if (stream) stream->close();
+        if (device) device->close();
+        rcg::System::clearSystems();
         return -1;
     }
 
-    PylonTerminate();
+    rcg::System::clearSystems();
 
     // Reset DAC outputs
     ljDAC_flower.set_A_output(0.0);
@@ -209,134 +207,111 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-// Select and connect to Basler camera
-CInstantCamera* SelectAndConnectCamera()
+// Select and connect to GenICam camera
+std::shared_ptr<rcg::Device> SelectAndConnectCamera()
 {
     try
     {
-        CTlFactory& tlFactory = CTlFactory::GetInstance();
+        // Enumerate all devices across all systems and interfaces
+        std::vector<std::shared_ptr<rcg::Device>> allDevices;
 
-        DeviceInfoList_t devices;
-        if (tlFactory.EnumerateDevices(devices) == 0)
+        std::vector<std::shared_ptr<rcg::System>> systems = rcg::System::getSystems();
+        for (auto& system : systems)
         {
-            cout << "No cameras found!" << endl;
-            return NULL;
+            system->open();
+            std::vector<std::shared_ptr<rcg::Interface>> interfaces = system->getInterfaces();
+            for (auto& iface : interfaces)
+            {
+                iface->open();
+                std::vector<std::shared_ptr<rcg::Device>> devices = iface->getDevices();
+                for (auto& dev : devices)
+                {
+                    allDevices.push_back(dev);
+                }
+                iface->close();
+            }
         }
 
-        cout << "Found " << devices.size() << " camera(s):" << endl;
-        for (size_t i = 0; i < devices.size(); i++)
+        if (allDevices.empty())
         {
-            cout << "  [" << i << "] " << devices[i].GetModelName()
-                 << " (" << devices[i].GetSerialNumber() << ")" << endl;
+            cout << "No cameras found!" << endl;
+            return nullptr;
+        }
+
+        cout << "Found " << allDevices.size() << " camera(s):" << endl;
+        for (size_t i = 0; i < allDevices.size(); i++)
+        {
+            cout << "  [" << i << "] " << allDevices[i]->getVendor()
+                 << " " << allDevices[i]->getModel()
+                 << " (" << allDevices[i]->getSerialNumber() << ")" << endl;
         }
 
         int selectedCamera = 0;
-        if (devices.size() > 1)
+        if (allDevices.size() > 1)
         {
-            cout << "Select camera [0-" << devices.size()-1 << "]: ";
+            cout << "Select camera [0-" << allDevices.size()-1 << "]: ";
             cin >> selectedCamera;
-            if (selectedCamera < 0 || selectedCamera >= (int)devices.size())
+            if (selectedCamera < 0 || selectedCamera >= (int)allDevices.size())
                 selectedCamera = 0;
         }
 
         cout << "Connecting to camera " << selectedCamera << "..." << endl;
 
-        CInstantCamera* camera = new CInstantCamera(tlFactory.CreateDevice(devices[selectedCamera]));
-        camera->Open();
+        std::shared_ptr<rcg::Device> device = allDevices[selectedCamera];
+        device->open(rcg::Device::CONTROL);
 
-        if (camera->IsOpen())
-        {
-            cout << "Connected to: " << devices[selectedCamera].GetModelName() << endl;
-        }
+        cout << "Connected to: " << device->getVendor() << " " << device->getModel() << endl;
 
-        return camera;
+        return device;
     }
-    catch (const GenericException &e)
+    catch (exception& e)
     {
-        cout << "Error selecting camera: " << e.GetDescription() << endl;
-        return NULL;
+        cout << "Error selecting camera: " << e.what() << endl;
+        return nullptr;
     }
 }
 
 // Configure camera ROI and settings
-void ConfigureCamera(CInstantCamera* camera, int dimROI)
+void ConfigureCamera(std::shared_ptr<rcg::Device> device, int dimROI)
 {
     try
     {
-        GenApi::INodeMap& nodemap = camera->GetNodeMap();
+        auto nodemap = device->getRemoteNodeMap();
 
-        CIntegerPtr width(nodemap.GetNode("Width"));
-        if (IsWritable(width))
-        {
-            width->SetValue(dimROI);
-            cout << "Set Width to: " << width->GetValue() << endl;
-        }
+        rcg::setInteger(nodemap, "Width", dimROI, true);
+        cout << "Set Width to: " << rcg::getInteger(nodemap, "Width") << endl;
 
-        CIntegerPtr height(nodemap.GetNode("Height"));
-        if (IsWritable(height))
-        {
-            height->SetValue(dimROI);
-            cout << "Set Height to: " << height->GetValue() << endl;
-        }
+        rcg::setInteger(nodemap, "Height", dimROI, true);
+        cout << "Set Height to: " << rcg::getInteger(nodemap, "Height") << endl;
 
-        CIntegerPtr offsetX(nodemap.GetNode("OffsetX"));
-        if (IsWritable(offsetX))
-        {
-            int64_t offsetXValue = dimROI / 2;
-            offsetX->SetValue(offsetXValue);
-            cout << "Set OffsetX to: " << offsetX->GetValue() << endl;
-        }
+        rcg::setInteger(nodemap, "OffsetX", dimROI / 2, true);
+        cout << "Set OffsetX to: " << rcg::getInteger(nodemap, "OffsetX") << endl;
 
-        CIntegerPtr offsetY(nodemap.GetNode("OffsetY"));
-        if (IsWritable(offsetY))
-        {
-            int64_t offsetYValue = dimROI / 2;
-            offsetY->SetValue(offsetYValue);
-            cout << "Set OffsetY to: " << offsetY->GetValue() << endl;
-        }
+        rcg::setInteger(nodemap, "OffsetY", dimROI / 2, true);
+        cout << "Set OffsetY to: " << rcg::getInteger(nodemap, "OffsetY") << endl;
 
-        CEnumerationPtr pixelFormat(nodemap.GetNode("PixelFormat"));
-        if (IsWritable(pixelFormat))
-        {
-            pixelFormat->FromString("Mono8");
-            cout << "Pixel Format: " << pixelFormat->ToString() << endl;
-        }
-
+        rcg::setEnum(nodemap, "PixelFormat", "Mono8", true);
+        cout << "Pixel Format: " << rcg::getEnum(nodemap, "PixelFormat") << endl;
     }
-    catch (const GenericException &e)
+    catch (exception& e)
     {
-        cout << "Error configuring camera: " << e.GetDescription() << endl;
+        cout << "Error configuring camera: " << e.what() << endl;
         throw;
     }
 }
 
 // Acquire hologram images
-void AcquireImages(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt, string result_path,
+void AcquireImages(std::shared_ptr<rcg::Device> device, std::shared_ptr<rcg::Stream> stream,
+                   Ljack_DAC *DAC_tiptilt,
                    string acquis_path, int dimROI, vector<float2D> &Vout_table)
 {
-    int nbHolo = MAX_IMAGES;
-
     try
     {
-        GenApi::INodeMap& nodemap = camera->GetNodeMap();
-
-        CIntegerPtr width(nodemap.GetNode("Width"));
-        if (IsWritable(width))
-            width->SetValue(dimROI);
-
-        CIntegerPtr height(nodemap.GetNode("Height"));
-        if (IsWritable(height))
-            height->SetValue(dimROI);
+        auto nodemap = device->getRemoteNodeMap();
 
         cout << "Starting acquisition..." << endl;
 
-        // OneByOne ensures synchronization with mirror steps
-        camera->StartGrabbing(GrabStrategy_OneByOne, GrabLoop_ProvidedByUser);
-
-        CImageFormatConverter formatConverter;
-        formatConverter.OutputPixelFormat = PixelType_Mono8;
-        CPylonImage pylonImage;
-        CGrabResultPtr ptrGrabResult;
+        stream->startStreaming();
 
         // Initialize DAC
         float2D Vscan = {0*tiptilt_factor_x, 0*tiptilt_factor_y};
@@ -359,14 +334,23 @@ void AcquireImages(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt, string result
         vTime.clear();
         vTime.start();
 
-        while (img_count < MAX_IMAGES && camera->IsGrabbing())
+        while (img_count < MAX_IMAGES)
         {
             try
             {
-                camera->RetrieveResult(5000, ptrGrabResult, TimeoutHandling_ThrowException);
+                const rcg::Buffer* buffer = stream->grab(5000);
 
-                if (ptrGrabResult->GrabSucceeded())
+                if (buffer == nullptr)
                 {
+                    cout << "Error: grab timeout" << endl;
+                    break;
+                }
+
+                if (!buffer->getIsIncomplete())
+                {
+                    size_t lWidth = buffer->getWidth(0);
+                    size_t lHeight = buffer->getHeight(0);
+
                     double t_now = (double)cv::getTickCount();
                     double dt = (t_now - t_last) / cv::getTickFrequency();
                     t_last = t_now;
@@ -378,12 +362,11 @@ void AcquireImages(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt, string result
                         else current_fps = (1.0 - alpha) * current_fps + alpha * instant_fps;
 
                         // Bandwidth in MB/s (1 pixel = 1 byte for Mono8)
-                        double frameBytes = (double)ptrGrabResult->GetWidth() * (double)ptrGrabResult->GetHeight();
+                        double frameBytes = (double)lWidth * (double)lHeight;
                         bandwidth_MBps = (frameBytes * current_fps) / 1000000.0;
                     }
 
-                    formatConverter.Convert(pylonImage, ptrGrabResult);
-                    cv::Mat lframe(ptrGrabResult->GetHeight(), ptrGrabResult->GetWidth(), CV_8UC1, (uint8_t*)pylonImage.GetBuffer());
+                    cv::Mat lframe(lHeight, lWidth, CV_8UC1, (uint8_t*)buffer->getBase(0));
 
                     imwrite(acquis_path + format("/i%03zu.pgm", img_count), lframe);
 
@@ -397,8 +380,8 @@ void AcquireImages(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt, string result
 
                     cout << fixed << setprecision(1);
                     cout << lDoodle[lDoodleIndex]
-                         << " W: " << ptrGrabResult->GetWidth()
-                         << " H: " << ptrGrabResult->GetHeight()
+                         << " W: " << lWidth
+                         << " H: " << lHeight
                          << " | " << current_fps << " FPS "
                          << bandwidth_MBps << " MB/s "
                          << "(" << img_count << "/" << MAX_IMAGES << ")\r";
@@ -406,14 +389,14 @@ void AcquireImages(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt, string result
                 }
                 else
                 {
-                    cout << "Error: " << ptrGrabResult->GetErrorCode() << " " << ptrGrabResult->GetErrorDescription() << endl;
+                    cout << "Error: incomplete buffer received" << endl;
                 }
 
                 ++lDoodleIndex %= 6;
             }
-            catch (const GenericException &e)
+            catch (exception& e)
             {
-                cout << "Error grabbing image: " << e.GetDescription() << endl;
+                cout << "Error grabbing image: " << e.what() << endl;
                 break;
             }
         }
@@ -421,26 +404,28 @@ void AcquireImages(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt, string result
         cout << endl;
 
         cout << "Stopping acquisition..." << endl;
-        camera->StopGrabbing();
+        stream->stopStreaming();
 
         // Reset ROI to maximum
-        CIntegerPtr widthMax(nodemap.GetNode("Width"));
-        if (IsWritable(widthMax)) widthMax->SetValue(widthMax->GetMax());
+        int64_t vmax;
+        rcg::getInteger(nodemap, "Width", nullptr, &vmax);
+        rcg::setInteger(nodemap, "Width", vmax, true);
 
-        CIntegerPtr heightMax(nodemap.GetNode("Height"));
-        if (IsWritable(heightMax)) heightMax->SetValue(heightMax->GetMax());
+        rcg::getInteger(nodemap, "Height", nullptr, &vmax);
+        rcg::setInteger(nodemap, "Height", vmax, true);
     }
-    catch (const GenericException &e)
+    catch (exception& e)
     {
-        cout << "Error during acquisition: " << e.GetDescription() << endl;
-        if(camera->IsGrabbing()) camera->StopGrabbing();
+        cout << "Error during acquisition: " << e.what() << endl;
+        stream->stopStreaming();
         throw;
     }
 }
 
 // Acquire reference intensity image
-void AcquireIntensityRef(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt,
-                         string result_path, string acquis_path, int dimROI)
+void AcquireIntensityRef(std::shared_ptr<rcg::Device> device, std::shared_ptr<rcg::Stream> stream,
+                         Ljack_DAC *DAC_tiptilt,
+                         string acquis_path, int dimROI)
 {
     // Set reference voltages
     DAC_tiptilt->set_A_output(0);
@@ -448,80 +433,52 @@ void AcquireIntensityRef(CInstantCamera* camera, Ljack_DAC *DAC_tiptilt,
 
     try
     {
-        GenApi::INodeMap& nodemap = camera->GetNodeMap();
-
-        CIntegerPtr width(nodemap.GetNode("Width"));
-        if (IsWritable(width))
-            width->SetValue(dimROI);
-
-        CIntegerPtr height(nodemap.GetNode("Height"));
-        if (IsWritable(height))
-            height->SetValue(dimROI);
-
-        CIntegerPtr offsetX(nodemap.GetNode("OffsetX"));
-        if (IsWritable(offsetX))
-            offsetX->SetValue(dimROI / 2);
-
-        CIntegerPtr offsetY(nodemap.GetNode("OffsetY"));
-        if (IsWritable(offsetY))
-            offsetY->SetValue(dimROI / 2);
+        ConfigureCamera(device, dimROI);
+        auto nodemap = device->getRemoteNodeMap();
 
         cout << endl << "##-- Reference Acquisition --##" << endl;
-        camera->StartGrabbing(GrabStrategy_OneByOne);
-
-        CImageFormatConverter formatConverter;
-        formatConverter.OutputPixelFormat = PixelType_Mono8;
-        CPylonImage pylonImage;
+        stream->startStreaming();
 
         // Wait for DAC to settle
         boost::posix_time::milliseconds delay_cam(100);
         boost::this_thread::sleep(delay_cam);
 
-        CGrabResultPtr ptrGrabResult;
-        camera->RetrieveResult(5000, ptrGrabResult, TimeoutHandling_ThrowException);
+        const rcg::Buffer* buffer = stream->grab(5000);
 
-        if (ptrGrabResult->GrabSucceeded())
+        if (buffer != nullptr && !buffer->getIsIncomplete())
         {
             DAC_tiptilt->set_A_output(9.5);
             DAC_tiptilt->set_B_output(9.5);
 
-            size_t lWidth = ptrGrabResult->GetWidth();
-            size_t lHeight = ptrGrabResult->GetHeight();
+            size_t lWidth = buffer->getWidth(0);
+            size_t lHeight = buffer->getHeight(0);
 
             cout << "  W: " << lWidth << " H: " << lHeight << endl;
 
-            formatConverter.Convert(pylonImage, ptrGrabResult);
-            cv::Mat lframe(lHeight, lWidth, CV_8UC1, (uint8_t*)pylonImage.GetBuffer());
+            cv::Mat lframe(lHeight, lWidth, CV_8UC1, (uint8_t*)buffer->getBase(0));
 
             imwrite(acquis_path + "/Intensite_ref.pgm", lframe);
             cout << "Reference intensity saved to " << acquis_path << endl;
         }
         else
         {
-            cout << "Failed to acquire reference image: " << ptrGrabResult->GetErrorDescription() << endl;
+            cout << "Failed to acquire reference image" << endl;
         }
 
-        camera->StopGrabbing();
+        stream->stopStreaming();
 
         // Reset ROI to maximum
-        CIntegerPtr widthMax(nodemap.GetNode("Width"));
-        if (IsWritable(widthMax))
-            widthMax->SetValue(widthMax->GetMax());
+        int64_t vmax;
+        rcg::getInteger(nodemap, "Width", nullptr, &vmax);
+        rcg::setInteger(nodemap, "Width", vmax, true);
 
-        CIntegerPtr heightMax(nodemap.GetNode("Height"));
-        if (IsWritable(heightMax))
-            heightMax->SetValue(heightMax->GetMax());
+        rcg::getInteger(nodemap, "Height", nullptr, &vmax);
+        rcg::setInteger(nodemap, "Height", vmax, true);
     }
-    catch (const GenericException &e)
+    catch (exception& e)
     {
-        cout << "Error during reference acquisition: " << e.GetDescription() << endl;
+        cout << "Error during reference acquisition: " << e.what() << endl;
         throw;
     }
 }
 
-std::string IntToString(int number)
-{
-    std::ostringstream oss;
-    oss << number;
-    return oss.str();
-}
