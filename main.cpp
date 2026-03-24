@@ -10,21 +10,15 @@ using namespace std;
 #include <string>
 #include <sstream>
 
-// rc_genicam_api
-#include <rc_genicam_api/system.h>
-#include <rc_genicam_api/interface.h>
-#include <rc_genicam_api/device.h>
-#include <rc_genicam_api/stream.h>
-#include <rc_genicam_api/buffer.h>
-#include <rc_genicam_api/config.h>
-using namespace GenApi;
+// Aravis
+#include <arv.h>
 
 #include "Ljack.h"
 #include "Ljack_DAC.h"
 #include "macros.h"
 #include "vChronos.h"
-#include <boost/thread.hpp>
-#include <boost/date_time.hpp>
+#include <thread>
+#include <chrono>
 
 #include <unistd.h>
 #include <stdio.h>
@@ -33,11 +27,14 @@ using namespace GenApi;
 #include <termios.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <vector>
+#include <set>
 
 #include "functions.h"
 #include "scan_functions.h"
 
 #include <list>
+#include <iomanip>
 
 float tiptilt_factor_x = 0;
 float tiptilt_factor_y = 0;
@@ -46,8 +43,9 @@ unsigned int b_AmpliRef = 0;
 float NAcondLim = 1; // condenser NA scanning limit coefficient, 0 < value <= 1
 size_t MAX_IMAGES = 0;
 
-// Global pointer for SIGINT cleanup
+// Global pointers for SIGINT cleanup
 static Ljack_DAC* g_DAC_ptr = NULL;
+static ArvCamera* g_camera_ptr = NULL;
 
 void sigint_handler(int sig)
 {
@@ -57,19 +55,22 @@ void sigint_handler(int sig)
         g_DAC_ptr->set_A_output(0.0);
         g_DAC_ptr->set_B_output(0.0);
     }
-    rcg::System::clearSystems();
+    if (g_camera_ptr)
+        g_object_unref(g_camera_ptr);
+    arv_shutdown();
     exit(1);
 }
 
 // Function Prototypes
-std::shared_ptr<rcg::Device> SelectAndConnectCamera();
-void ConfigureCamera(std::shared_ptr<rcg::Device> device, int dimROI);
-void AcquireImages(std::shared_ptr<rcg::Device> device, std::shared_ptr<rcg::Stream> stream,
-                   Ljack_DAC *DAC_tiptilt,
+ArvCamera* SelectAndConnectCamera();
+void ConfigureCamera(ArvCamera* camera, int dimROI, int offsetROI_X, int offsetROI_Y);
+ArvStream* StartAcquisition(ArvCamera* camera);
+void StopAcquisition(ArvCamera* camera, ArvStream* stream);
+void ResetROIToMax(ArvCamera* camera);
+void AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
                    string acquis_path, int dimROI, vector<float2D> &Vout_table);
-void AcquireIntensityRef(std::shared_ptr<rcg::Device> device, std::shared_ptr<rcg::Stream> stream,
-                         Ljack_DAC *DAC_tiptilt,
-                         string acquis_path, int dimROI);
+void AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
+                         string acquis_path, int dimROI, int offsetROI_X, int offsetROI_Y);
 
 int main(int argc, char *argv[])
 {
@@ -89,6 +90,8 @@ int main(int argc, char *argv[])
     cout << "Config file: " << manip_config_path << endl;
 
     int dimROI = extract_val("DIM_ROI", manip_config_path);
+    int offsetROI_X = extract_val("OFFSET_ROI_X", manip_config_path);
+    int offsetROI_Y = extract_val("OFFSET_ROI_Y", manip_config_path);
     int NXMAX = extract_val("NXMAX", manip_config_path);
 
     string acquis_dir = acquis_path;
@@ -148,41 +151,30 @@ int main(int argc, char *argv[])
     if(scan_pattern_exist == 0)
         cout << "Cannot handle this scan pattern" << endl;
 
-    std::shared_ptr<rcg::Device> device;
-    std::shared_ptr<rcg::Stream> stream;
+    ArvCamera* camera = NULL;
 
     try
     {
         cout << "GenICam Camera Acquisition:" << endl << endl;
 
-        device = SelectAndConnectCamera();
+        camera = SelectAndConnectCamera();
 
-        if (device)
+        if (camera)
         {
-            // Open the first available stream
-            std::vector<std::shared_ptr<rcg::Stream>> streams = device->getStreams();
-            if (streams.empty())
-            {
-                cout << "No streams available on device" << endl;
-                device->close();
-                rcg::System::clearSystems();
-                return -1;
-            }
-            stream = streams[0];
-            stream->open();
+            g_camera_ptr = camera;
 
-            ConfigureCamera(device, dimROI);
+            ConfigureCamera(camera, dimROI, offsetROI_X, offsetROI_Y);
 
             // Acquire hologram images
-            AcquireImages(device, stream, &ljDAC_flower, acquis_path, dimROI, Vout_table);
+            AcquireImages(camera, &ljDAC_flower, acquis_path, dimROI, Vout_table);
 
             // Acquire reference intensity if needed
             if(b_AmpliRef == 1)
-                AcquireIntensityRef(device, stream, &ljDAC_flower, acquis_path, dimROI);
+                AcquireIntensityRef(camera, &ljDAC_flower, acquis_path, dimROI, offsetROI_X, offsetROI_Y);
 
             cout << "Closing camera" << endl;
-            stream->close();
-            device->close();
+            g_object_unref(camera);
+            g_camera_ptr = NULL;
         }
         else
         {
@@ -192,13 +184,16 @@ int main(int argc, char *argv[])
     catch (exception& e)
     {
         cout << "Exception: " << e.what() << endl;
-        if (stream) stream->close();
-        if (device) device->close();
-        rcg::System::clearSystems();
+        if (camera)
+        {
+            g_object_unref(camera);
+            g_camera_ptr = NULL;
+        }
+        arv_shutdown();
         return -1;
     }
 
-    rcg::System::clearSystems();
+    arv_shutdown();
 
     // Reset DAC outputs
     ljDAC_flower.set_A_output(0.0);
@@ -208,277 +203,355 @@ int main(int argc, char *argv[])
 }
 
 // Select and connect to GenICam camera
-std::shared_ptr<rcg::Device> SelectAndConnectCamera()
+ArvCamera* SelectAndConnectCamera()
 {
-    try
+    arv_update_device_list();
+    unsigned int n_devices = arv_get_n_devices();
+
+    if (n_devices == 0)
     {
-        // Enumerate all devices across all systems and interfaces
-        std::vector<std::shared_ptr<rcg::Device>> allDevices;
-
-        std::vector<std::shared_ptr<rcg::System>> systems = rcg::System::getSystems();
-        for (auto& system : systems)
-        {
-            system->open();
-            std::vector<std::shared_ptr<rcg::Interface>> interfaces = system->getInterfaces();
-            for (auto& iface : interfaces)
-            {
-                iface->open();
-                std::vector<std::shared_ptr<rcg::Device>> devices = iface->getDevices();
-                for (auto& dev : devices)
-                {
-                    allDevices.push_back(dev);
-                }
-                iface->close();
-            }
-        }
-
-        if (allDevices.empty())
-        {
-            cout << "No cameras found!" << endl;
-            return nullptr;
-        }
-
-        cout << "Found " << allDevices.size() << " camera(s):" << endl;
-        for (size_t i = 0; i < allDevices.size(); i++)
-        {
-            cout << "  [" << i << "] " << allDevices[i]->getVendor()
-                 << " " << allDevices[i]->getModel()
-                 << " (" << allDevices[i]->getSerialNumber() << ")" << endl;
-        }
-
-        int selectedCamera = 0;
-        if (allDevices.size() > 1)
-        {
-            cout << "Select camera [0-" << allDevices.size()-1 << "]: ";
-            cin >> selectedCamera;
-            if (selectedCamera < 0 || selectedCamera >= (int)allDevices.size())
-                selectedCamera = 0;
-        }
-
-        cout << "Connecting to camera " << selectedCamera << "..." << endl;
-
-        std::shared_ptr<rcg::Device> device = allDevices[selectedCamera];
-        device->open(rcg::Device::CONTROL);
-
-        cout << "Connected to: " << device->getVendor() << " " << device->getModel() << endl;
-
-        return device;
+        cout << "No cameras found!" << endl;
+        return NULL;
     }
-    catch (exception& e)
+
+    // Build deduplicated device list (by serial + protocol)
+    set<string> seen_keys;
+    vector<unsigned int> unique_devices;
+    for (unsigned int i = 0; i < n_devices; i++)
     {
-        cout << "Error selecting camera: " << e.what() << endl;
-        return nullptr;
+        const char* serial = arv_get_device_serial_nbr(i);
+        const char* protocol = arv_get_device_protocol(i);
+        string key = string(serial ? serial : to_string(i)) + "|" + (protocol ? protocol : "");
+        if (seen_keys.insert(key).second)
+            unique_devices.push_back(i);
     }
+
+    cout << "Found " << unique_devices.size() << " camera(s):" << endl;
+    for (unsigned int i = 0; i < unique_devices.size(); i++)
+    {
+        unsigned int idx = unique_devices[i];
+        const char* vendor = arv_get_device_vendor(idx);
+        const char* model = arv_get_device_model(idx);
+        const char* serial = arv_get_device_serial_nbr(idx);
+        const char* protocol = arv_get_device_protocol(idx);
+        cout << "  [" << i << "] "
+             << (vendor ? vendor : "?") << " "
+             << (model ? model : "?")
+             << " (" << (serial ? serial : "?") << ")"
+             << " [" << (protocol ? protocol : "?") << "]" << endl;
+    }
+
+    unsigned int selectedCamera = 0;
+    if (unique_devices.size() > 1)
+    {
+        cout << "Select camera [0-" << unique_devices.size()-1 << "]: ";
+        cin >> selectedCamera;
+        if (selectedCamera >= unique_devices.size())
+            selectedCamera = 0;
+    }
+
+    unsigned int deviceIdx = unique_devices[selectedCamera];
+    cout << "Connecting to camera " << selectedCamera << "..." << endl;
+
+    GError* error = NULL;
+    ArvCamera* camera = arv_camera_new(arv_get_device_id(deviceIdx), &error);
+    if (error)
+    {
+        cout << "Error connecting to camera: " << error->message << endl;
+        g_error_free(error);
+        return NULL;
+    }
+
+    const char* vendor = arv_get_device_vendor(deviceIdx);
+    const char* model = arv_get_device_model(deviceIdx);
+    cout << "Connected to: "
+         << (vendor ? vendor : "?") << " "
+         << (model ? model : "?") << endl;
+
+    return camera;
 }
 
 // Configure camera ROI and settings
-void ConfigureCamera(std::shared_ptr<rcg::Device> device, int dimROI)
+void ConfigureCamera(ArvCamera* camera, int dimROI, int offsetROI_X, int offsetROI_Y)
 {
-    try
+    GError* error = NULL;
+
+    // Set ROI: offset and dimensions (skip if all values are -1)
+    if (dimROI >= 0 || offsetROI_X >= 0 || offsetROI_Y >= 0)
     {
-        auto nodemap = device->getRemoteNodeMap();
-
-        rcg::setInteger(nodemap, "Width", dimROI, true);
-        cout << "Set Width to: " << rcg::getInteger(nodemap, "Width") << endl;
-
-        rcg::setInteger(nodemap, "Height", dimROI, true);
-        cout << "Set Height to: " << rcg::getInteger(nodemap, "Height") << endl;
-
-        rcg::setInteger(nodemap, "OffsetX", dimROI / 2, true);
-        cout << "Set OffsetX to: " << rcg::getInteger(nodemap, "OffsetX") << endl;
-
-        rcg::setInteger(nodemap, "OffsetY", dimROI / 2, true);
-        cout << "Set OffsetY to: " << rcg::getInteger(nodemap, "OffsetY") << endl;
-
-        rcg::setEnum(nodemap, "PixelFormat", "Mono8", true);
-        cout << "Pixel Format: " << rcg::getEnum(nodemap, "PixelFormat") << endl;
+        arv_camera_set_region(camera, offsetROI_X, offsetROI_Y, dimROI, dimROI, &error);
+        if (error)
+        {
+            cout << "Error setting ROI: " << error->message << endl;
+            g_error_free(error);
+            error = NULL;
+        }
     }
-    catch (exception& e)
+    else
     {
-        cout << "Error configuring camera: " << e.what() << endl;
-        throw;
+        cout << "ROI config values are -1, keeping camera's current ROI" << endl;
     }
+
+    // Set pixel format
+    arv_camera_set_pixel_format_from_string(camera, "Mono8", &error);
+    if (error)
+    {
+        cout << "Error setting pixel format: " << error->message << endl;
+        g_error_free(error);
+        error = NULL;
+    }
+
+    // Readback
+    gint x, y, w, h;
+    arv_camera_get_region(camera, &x, &y, &w, &h, &error);
+    if (!error)
+    {
+        cout << "Set Width to: " << w << endl;
+        cout << "Set Height to: " << h << endl;
+        cout << "Set OffsetX to: " << x << endl;
+        cout << "Set OffsetY to: " << y << endl;
+    }
+    else
+    {
+        g_error_free(error);
+        error = NULL;
+    }
+
+    const char* pf = arv_camera_get_pixel_format_as_string(camera, &error);
+    if (!error && pf)
+        cout << "Pixel Format: " << pf << endl;
+    else if (error)
+    {
+        g_error_free(error);
+        error = NULL;
+    }
+}
+
+// Create stream, allocate buffers, and start acquisition. Returns stream or NULL on error.
+ArvStream* StartAcquisition(ArvCamera* camera)
+{
+    GError* error = NULL;
+
+    guint payload = arv_camera_get_payload(camera, &error);
+    if (error)
+    {
+        cout << "Error getting payload: " << error->message << endl;
+        g_error_free(error);
+        return NULL;
+    }
+
+    ArvStream* stream = arv_camera_create_stream(camera, NULL, NULL, &error);
+    if (error || !stream)
+    {
+        cout << "Error creating stream: " << (error ? error->message : "unknown") << endl;
+        if (error) g_error_free(error);
+        return NULL;
+    }
+
+    for (int i = 0; i < 10; i++)
+        arv_stream_push_buffer(stream, arv_buffer_new(payload, NULL));
+
+    arv_camera_start_acquisition(camera, &error);
+    if (error)
+    {
+        cout << "Error starting acquisition: " << error->message << endl;
+        g_error_free(error);
+        g_object_unref(stream);
+        return NULL;
+    }
+
+    return stream;
+}
+
+// Stop acquisition and release stream
+void StopAcquisition(ArvCamera* camera, ArvStream* stream)
+{
+    GError* error = NULL;
+    arv_camera_stop_acquisition(camera, &error);
+    if (error)
+    {
+        cout << "Warning: error stopping acquisition: " << error->message << endl;
+        g_error_free(error);
+    }
+    g_object_unref(stream);
+}
+
+// Reset camera ROI to maximum sensor dimensions
+void ResetROIToMax(ArvCamera* camera)
+{
+    GError* error = NULL;
+    gint bounds_max;
+
+    arv_camera_get_width_bounds(camera, NULL, &bounds_max, &error);
+    if (!error)
+    {
+        arv_camera_set_integer(camera, "Width", bounds_max, &error);
+        if (error) { g_error_free(error); error = NULL; }
+    }
+    else { g_error_free(error); error = NULL; }
+
+    arv_camera_get_height_bounds(camera, NULL, &bounds_max, &error);
+    if (!error)
+    {
+        arv_camera_set_integer(camera, "Height", bounds_max, &error);
+        if (error) { g_error_free(error); error = NULL; }
+    }
+    else { g_error_free(error); error = NULL; }
 }
 
 // Acquire hologram images
-void AcquireImages(std::shared_ptr<rcg::Device> device, std::shared_ptr<rcg::Stream> stream,
-                   Ljack_DAC *DAC_tiptilt,
+void AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
                    string acquis_path, int dimROI, vector<float2D> &Vout_table)
 {
-    try
+    cout << "Starting acquisition..." << endl;
+
+    ArvStream* stream = StartAcquisition(camera);
+    if (!stream)
+        return;
+
+    // Initialize DAC
+    float2D Vscan = {0*tiptilt_factor_x, 0*tiptilt_factor_y};
+    DAC_tiptilt->set_A_output(Vscan.x*tiptilt_factor_x + VfOffset.x);
+    DAC_tiptilt->set_B_output(Vscan.y*tiptilt_factor_y + VfOffset.y);
+
+    cout << endl << "##-- Hologram Acquisition --##" << endl;
+
+    char lDoodle[] = "|\\-|-/";
+    int lDoodleIndex = 0;
+    size_t img_count = 0;
+
+    // FPS calculation
+    double t_last = (double)cv::getTickCount();
+    double current_fps = 0.0;
+    double bandwidth_MBps = 0.0;
+    double alpha = 0.1; // smoothing factor
+
+    vChronos vTime("image_capture");
+    vTime.clear();
+    vTime.start();
+
+    while (img_count < MAX_IMAGES)
     {
-        auto nodemap = device->getRemoteNodeMap();
+        ArvBuffer* buffer = arv_stream_timeout_pop_buffer(stream, 5000000); // 5s in microseconds
 
-        cout << "Starting acquisition..." << endl;
-
-        stream->startStreaming();
-
-        // Initialize DAC
-        float2D Vscan = {0*tiptilt_factor_x, 0*tiptilt_factor_y};
-        DAC_tiptilt->set_A_output(Vscan.x*tiptilt_factor_x + VfOffset.x);
-        DAC_tiptilt->set_B_output(Vscan.y*tiptilt_factor_y + VfOffset.y);
-
-        cout << endl << "##-- Hologram Acquisition --##" << endl;
-
-        char lDoodle[] = "|\\-|-/";
-        int lDoodleIndex = 0;
-        size_t img_count = 0;
-
-        // FPS calculation
-        double t_last = (double)cv::getTickCount();
-        double current_fps = 0.0;
-        double bandwidth_MBps = 0.0;
-        double alpha = 0.1; // smoothing factor
-
-        vChronos vTime("image_capture");
-        vTime.clear();
-        vTime.start();
-
-        while (img_count < MAX_IMAGES)
+        if (buffer == NULL)
         {
-            try
-            {
-                const rcg::Buffer* buffer = stream->grab(5000);
-
-                if (buffer == nullptr)
-                {
-                    cout << "Error: grab timeout" << endl;
-                    break;
-                }
-
-                if (!buffer->getIsIncomplete())
-                {
-                    size_t lWidth = buffer->getWidth(0);
-                    size_t lHeight = buffer->getHeight(0);
-
-                    double t_now = (double)cv::getTickCount();
-                    double dt = (t_now - t_last) / cv::getTickFrequency();
-                    t_last = t_now;
-
-                    if (dt > 0)
-                    {
-                        double instant_fps = 1.0 / dt;
-                        if (current_fps == 0) current_fps = instant_fps;
-                        else current_fps = (1.0 - alpha) * current_fps + alpha * instant_fps;
-
-                        // Bandwidth in MB/s (1 pixel = 1 byte for Mono8)
-                        double frameBytes = (double)lWidth * (double)lHeight;
-                        bandwidth_MBps = (frameBytes * current_fps) / 1000000.0;
-                    }
-
-                    cv::Mat lframe(lHeight, lWidth, CV_8UC1, (uint8_t*)buffer->getBase(0));
-
-                    imwrite(acquis_path + format("/i%03zu.pgm", img_count), lframe);
-
-                    // Update mirrors (DAC) for next image
-                    Vscan.x = Vout_table[img_count].x;
-                    Vscan.y = Vout_table[img_count].y;
-                    DAC_tiptilt->set_A_output(Vscan.x*tiptilt_factor_x + VfOffset.x);
-                    DAC_tiptilt->set_B_output(Vscan.y*tiptilt_factor_y + VfOffset.y);
-
-                    img_count++;
-
-                    cout << fixed << setprecision(1);
-                    cout << lDoodle[lDoodleIndex]
-                         << " W: " << lWidth
-                         << " H: " << lHeight
-                         << " | " << current_fps << " FPS "
-                         << bandwidth_MBps << " MB/s "
-                         << "(" << img_count << "/" << MAX_IMAGES << ")\r";
-                    cout.flush();
-                }
-                else
-                {
-                    cout << "Error: incomplete buffer received" << endl;
-                }
-
-                ++lDoodleIndex %= 6;
-            }
-            catch (exception& e)
-            {
-                cout << "Error grabbing image: " << e.what() << endl;
-                break;
-            }
+            cout << "Error: grab timeout" << endl;
+            break;
         }
 
-        cout << endl;
+        if (arv_buffer_get_status(buffer) == ARV_BUFFER_STATUS_SUCCESS)
+        {
+            size_t data_size;
+            const void* data = arv_buffer_get_image_data(buffer, &data_size);
+            size_t lWidth = arv_buffer_get_image_width(buffer);
+            size_t lHeight = arv_buffer_get_image_height(buffer);
 
-        cout << "Stopping acquisition..." << endl;
-        stream->stopStreaming();
+            double t_now = (double)cv::getTickCount();
+            double dt = (t_now - t_last) / cv::getTickFrequency();
+            t_last = t_now;
 
-        // Reset ROI to maximum
-        int64_t vmax;
-        rcg::getInteger(nodemap, "Width", nullptr, &vmax);
-        rcg::setInteger(nodemap, "Width", vmax, true);
+            if (dt > 0)
+            {
+                double instant_fps = 1.0 / dt;
+                if (current_fps == 0) current_fps = instant_fps;
+                else current_fps = (1.0 - alpha) * current_fps + alpha * instant_fps;
 
-        rcg::getInteger(nodemap, "Height", nullptr, &vmax);
-        rcg::setInteger(nodemap, "Height", vmax, true);
+                // Bandwidth in MB/s (1 pixel = 1 byte for Mono8)
+                double frameBytes = (double)lWidth * (double)lHeight;
+                bandwidth_MBps = (frameBytes * current_fps) / 1000000.0;
+            }
+
+            cv::Mat lframe(lHeight, lWidth, CV_8UC1, (uint8_t*)data);
+
+            // imwrite before pushing buffer back (data pointer invalidated after push)
+            imwrite(acquis_path + format("/i%03zu.pgm", img_count), lframe);
+
+            // Update mirrors (DAC) for next image
+            Vscan.x = Vout_table[img_count].x;
+            Vscan.y = Vout_table[img_count].y;
+            DAC_tiptilt->set_A_output(Vscan.x*tiptilt_factor_x + VfOffset.x);
+            DAC_tiptilt->set_B_output(Vscan.y*tiptilt_factor_y + VfOffset.y);
+
+            img_count++;
+
+            cout << fixed << setprecision(1);
+            cout << lDoodle[lDoodleIndex]
+                 << " W: " << lWidth
+                 << " H: " << lHeight
+                 << " | " << current_fps << " FPS "
+                 << bandwidth_MBps << " MB/s "
+                 << "(" << img_count << "/" << MAX_IMAGES << ")\r";
+            cout.flush();
+        }
+        else
+        {
+            cout << "Error: incomplete buffer received" << endl;
+        }
+
+        // Always push the buffer back to the stream
+        arv_stream_push_buffer(stream, buffer);
+
+        ++lDoodleIndex %= 6;
     }
-    catch (exception& e)
-    {
-        cout << "Error during acquisition: " << e.what() << endl;
-        stream->stopStreaming();
-        throw;
-    }
+
+    cout << endl;
+
+    cout << "Stopping acquisition..." << endl;
+    StopAcquisition(camera, stream);
+    if (dimROI >= 0)
+        ResetROIToMax(camera);
 }
 
 // Acquire reference intensity image
-void AcquireIntensityRef(std::shared_ptr<rcg::Device> device, std::shared_ptr<rcg::Stream> stream,
-                         Ljack_DAC *DAC_tiptilt,
-                         string acquis_path, int dimROI)
+void AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
+                         string acquis_path, int dimROI, int offsetROI_X, int offsetROI_Y)
 {
     // Set reference voltages
     DAC_tiptilt->set_A_output(0);
     DAC_tiptilt->set_B_output(8);
 
-    try
+    ConfigureCamera(camera, dimROI, offsetROI_X, offsetROI_Y);
+
+    cout << endl << "##-- Reference Acquisition --##" << endl;
+
+    ArvStream* stream = StartAcquisition(camera);
+    if (!stream)
+        return;
+
+    // Wait for DAC to settle
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    ArvBuffer* buffer = arv_stream_timeout_pop_buffer(stream, 5000000);
+
+    if (buffer != NULL && arv_buffer_get_status(buffer) == ARV_BUFFER_STATUS_SUCCESS)
     {
-        ConfigureCamera(device, dimROI);
-        auto nodemap = device->getRemoteNodeMap();
+        DAC_tiptilt->set_A_output(9.5);
+        DAC_tiptilt->set_B_output(9.5);
 
-        cout << endl << "##-- Reference Acquisition --##" << endl;
-        stream->startStreaming();
+        size_t data_size;
+        const void* data = arv_buffer_get_image_data(buffer, &data_size);
+        size_t lWidth = arv_buffer_get_image_width(buffer);
+        size_t lHeight = arv_buffer_get_image_height(buffer);
 
-        // Wait for DAC to settle
-        boost::posix_time::milliseconds delay_cam(100);
-        boost::this_thread::sleep(delay_cam);
+        cout << "  W: " << lWidth << " H: " << lHeight << endl;
 
-        const rcg::Buffer* buffer = stream->grab(5000);
+        cv::Mat lframe(lHeight, lWidth, CV_8UC1, (uint8_t*)data);
 
-        if (buffer != nullptr && !buffer->getIsIncomplete())
-        {
-            DAC_tiptilt->set_A_output(9.5);
-            DAC_tiptilt->set_B_output(9.5);
+        // imwrite before pushing buffer back
+        imwrite(acquis_path + "/Intensite_ref.pgm", lframe);
+        cout << "Reference intensity saved to " << acquis_path << endl;
 
-            size_t lWidth = buffer->getWidth(0);
-            size_t lHeight = buffer->getHeight(0);
-
-            cout << "  W: " << lWidth << " H: " << lHeight << endl;
-
-            cv::Mat lframe(lHeight, lWidth, CV_8UC1, (uint8_t*)buffer->getBase(0));
-
-            imwrite(acquis_path + "/Intensite_ref.pgm", lframe);
-            cout << "Reference intensity saved to " << acquis_path << endl;
-        }
-        else
-        {
-            cout << "Failed to acquire reference image" << endl;
-        }
-
-        stream->stopStreaming();
-
-        // Reset ROI to maximum
-        int64_t vmax;
-        rcg::getInteger(nodemap, "Width", nullptr, &vmax);
-        rcg::setInteger(nodemap, "Width", vmax, true);
-
-        rcg::getInteger(nodemap, "Height", nullptr, &vmax);
-        rcg::setInteger(nodemap, "Height", vmax, true);
+        arv_stream_push_buffer(stream, buffer);
     }
-    catch (exception& e)
+    else
     {
-        cout << "Error during reference acquisition: " << e.what() << endl;
-        throw;
+        cout << "Failed to acquire reference image" << endl;
+        if (buffer)
+            arv_stream_push_buffer(stream, buffer);
     }
+
+    StopAcquisition(camera, stream);
+    if (dimROI >= 0)
+        ResetROIToMax(camera);
 }
-
