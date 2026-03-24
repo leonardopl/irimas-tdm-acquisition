@@ -9,7 +9,7 @@
 #include <string.h>
 using namespace std;
 
-#define boostClock boost::chrono::system_clock
+#define boostClock std::chrono::system_clock
 #define _MSG_LEN 500
 
 class vChronos {
@@ -120,7 +120,7 @@ class vChronos {
 //==============================================================================
 
 /*
-#include <boost/chrono.hpp>
+#include <chrono>
 #include <iostream>
 
 #include "vChronos.h"

@@ -262,5 +262,9 @@ TIME_END(CHRONO1, "message");
 
 
 #define BOOL unsigned short int
+#ifndef FALSE
 #define FALSE 0
+#endif
+#ifndef TRUE
 #define TRUE 1
+#endif

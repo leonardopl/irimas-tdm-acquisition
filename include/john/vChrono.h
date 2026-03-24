@@ -1,12 +1,10 @@
-#include <boost/chrono.hpp>
+#include <chrono>
 
-// requiert boost 1.4.8
-
-// types possibles pour boostClock: 
+// types possibles pour boostClock:
 //
-// boost::chrono::system_clock
-// boost::chrono::steady_clock
-// boost::chrono::high_resolution_clock
+// std::chrono::system_clock
+// std::chrono::steady_clock
+// std::chrono::high_resolution_clock
 
 
 #ifndef __VECTRA_CHRONO__

@@ -248,18 +248,18 @@ AIR VOL HELPERS
  Time Measurement - C++ - depend on Boost
 *******************************************************************************/
 
-/* don't forget to make: 
+/* don't forget to make:
    #include "vChrono.h"
    before other includes
 
-   link with -lboost_system -lboost_chrono
+   std::chrono needs no extra link flags
 */
 
 // c'est que de la MERDE, passer à vChronos
 
 
 #define vCHRONO_SET(NAME, MSG)				\
-  vChrono<boost::chrono::system_clock> vC_##NAME;	\
+  vChrono<std::chrono::system_clock> vC_##NAME;	\
   const char* vc_msg_##NAME = MSG;			\
 
 #define vCHRONO_START(NAME)			\
@@ -276,7 +276,7 @@ AIR VOL HELPERS
 // shorter:
 
 #define vCHRONO_ASTART(NAME, MSG)			\
-  vChrono<boost::chrono::system_clock> vC_##NAME;	\
+  vChrono<std::chrono::system_clock> vC_##NAME;	\
   const char* vc_msg_##NAME = MSG;			\
   vC_##NAME.reset();					\
   cout << "\n::: start " << vc_msg_##NAME;		\
@@ -307,8 +307,8 @@ AIR VOL HELPERS
   }						\
     
 
-/* #include <boost/thread.hpp>   */
-/* #include <boost/date_time.hpp> */
+/* #include <thread>   */
+/* #include <chrono>   */
 // permet de paralléliser une attente avec l'exécution de code autre
 #define CODE_EXEC_WAIT(VCHRONOS, T_MS, CODE_EXEC)	\
   {						\
@@ -320,8 +320,7 @@ AIR VOL HELPERS
     if ( VCHRONOS.get_elapsed_time_ms() < T_MS )	\
       {									\
     double remaining = double(T_MS) - VCHRONOS.get_elapsed_time_ms();	\
-    boost::posix_time::milliseconds delay( remaining );			\
-    boost::this_thread::sleep( delay );					\
+    std::this_thread::sleep_for(std::chrono::milliseconds((int)remaining)); \
       }									\
   }
 
@@ -370,8 +369,10 @@ AIR VOL HELPERS
 
 /* determines the absolute value of a number */
 /* works for expressions but with multiple evals */
+#ifndef ABS
 #define ABS(EXP)				\
   (((EXP) > 0) ? (EXP) : -(EXP))
+#endif
 
 
 /* return the minimum value of both expressions values*/

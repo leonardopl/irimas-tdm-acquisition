@@ -4,13 +4,13 @@ Hologram acquisition software for Tomographic Diffraction Microscopy (TDM).
 Controls a GenICam-compatible camera and LabJack U3-HV DAC for automated beam steering
 during off-axis holographic tomography experiments.
 
-Adapted from the acquisition module of [MTD_transmission](https://github.com/madeba/MTD_transmission) by Matthieu Debailleul (IRIMAS, Université de Haute-Alsace). Ported from the Pleora eBUS SDK to [rc_genicam_api](https://github.com/roboception/rc_genicam_api) for multi-vendor camera support.
+Adapted from the acquisition module of [MTD_transmission](https://github.com/madeba/MTD_transmission) by Matthieu Debailleul (IRIMAS, Université de Haute-Alsace). Ported from the Pleora eBUS SDK to [Aravis](https://github.com/AravisProject/aravis) for multi-vendor camera support without vendor CTI files.
 
 ## Changes from upstream
 
 Key differences from the original [MTD_transmission](https://github.com/madeba/MTD_transmission) acquisition module:
 
-- **SDK migration**: Pleora eBUS SDK → rc_genicam_api; supports any GenICam-compatible camera (GigE Vision, USB3 Vision)
+- **SDK migration**: From Pleora eBUS SDK to Aravis; supports any GenICam-compatible camera (GigE Vision, USB3 Vision) without vendor SDK or CTI files
 - **DAC settling fix**: Reference acquisition now waits for DAC settling (100 ms) before image capture, rather than after
 - **Explicit pixel format**: Camera is configured to Mono8, removing reliance on device defaults
 - **SIGINT handling**: Added signal handler to reset DAC outputs on interrupt (Ctrl+C)
@@ -25,35 +25,20 @@ Key differences from the original [MTD_transmission](https://github.com/madeba/M
 
 ## Dependencies
 
-- [rc_genicam_api](https://github.com/roboception/rc_genicam_api) (>= 2.0)
+- [Aravis](https://github.com/AravisProject/aravis) (0.8.x)
 - LabJack driver libraries
 - OpenCV >= 4.x
-- Boost (system, filesystem, chrono, thread)
 - libtiff
 
-### Installing rc_genicam_api
+### Installing Aravis
 
-**Option A — .deb package (recommended):**
-
-Download the `.deb` for your distribution from [rc_genicam_api releases](https://github.com/roboception/rc_genicam_api/releases) and install:
+On Ubuntu/Debian:
 
 ```bash
-sudo dpkg -i rc-genicam-api_*.deb
+sudo apt install libaravis-dev
 ```
 
-**Option B — build from source:**
-
-```bash
-git clone https://github.com/roboception/rc_genicam_api.git
-cd rc_genicam_api
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
-sudo make install
-sudo ldconfig
-```
-
-The `GENICAM_GENTL64_PATH` environment variable must point to the directory containing the GenTL producer `.cti` file supplied by your camera vendor's SDK/driver. The exact path depends on the vendor and installation; consult your camera's documentation. It must be set system-wide (e.g. in `~/.bashrc` or `/etc/environment`).
+On other distributions, or to build from source, see the [Aravis documentation](https://aravisproject.github.io/aravis/aravis-stable/building.html).
 
 ## Build
 
