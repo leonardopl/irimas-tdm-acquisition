@@ -60,7 +60,9 @@ Acquisition parameters in `config_manip.txt`:
 
 | Parameter | Description |
 |-----------|-------------|
-| DIM_ROI | Camera ROI dimension (px) |
+| DIM_ROI | Camera ROI dimension (px). Set to -1 with OFFSET_ROI_X/Y to skip ROI config |
+| OFFSET_ROI_X | Camera ROI X offset (px) |
+| OFFSET_ROI_Y | Camera ROI Y offset (px) |
 | NB_HOLO | Number of holograms |
 | SCAN_PATTERN | Scan pattern name |
 | VXMIN/VXMAX/VYMIN/VYMAX | Mirror voltage range |
