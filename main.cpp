@@ -66,7 +66,6 @@ ArvCamera* SelectAndConnectCamera();
 void ConfigureCamera(ArvCamera* camera, int dimROI, int offsetROI_X, int offsetROI_Y);
 ArvStream* StartAcquisition(ArvCamera* camera);
 void StopAcquisition(ArvCamera* camera, ArvStream* stream);
-void ResetROIToMax(ArvCamera* camera);
 void AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
                    string acquis_path, int dimROI, vector<float2D> &Vout_table);
 void AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
@@ -376,29 +375,6 @@ void StopAcquisition(ArvCamera* camera, ArvStream* stream)
     g_object_unref(stream);
 }
 
-// Reset camera ROI to maximum sensor dimensions
-void ResetROIToMax(ArvCamera* camera)
-{
-    GError* error = NULL;
-    gint bounds_max;
-
-    arv_camera_get_width_bounds(camera, NULL, &bounds_max, &error);
-    if (!error)
-    {
-        arv_camera_set_integer(camera, "Width", bounds_max, &error);
-        if (error) { g_error_free(error); error = NULL; }
-    }
-    else { g_error_free(error); error = NULL; }
-
-    arv_camera_get_height_bounds(camera, NULL, &bounds_max, &error);
-    if (!error)
-    {
-        arv_camera_set_integer(camera, "Height", bounds_max, &error);
-        if (error) { g_error_free(error); error = NULL; }
-    }
-    else { g_error_free(error); error = NULL; }
-}
-
 // Acquire hologram images
 void AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
                    string acquis_path, int dimROI, vector<float2D> &Vout_table)
@@ -499,8 +475,6 @@ void AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
 
     cout << "Stopping acquisition..." << endl;
     StopAcquisition(camera, stream);
-    if (dimROI >= 0)
-        ResetROIToMax(camera);
 }
 
 // Acquire reference intensity image
@@ -552,6 +526,4 @@ void AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
     }
 
     StopAcquisition(camera, stream);
-    if (dimROI >= 0)
-        ResetROIToMax(camera);
 }
