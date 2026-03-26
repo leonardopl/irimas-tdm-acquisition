@@ -12,7 +12,7 @@ Key differences from the original [MTD_transmission](https://github.com/madeba/M
 
 - **SDK migration**: From Pleora eBUS SDK to Aravis; supports any GenICam-compatible camera (GigE Vision, USB3 Vision) without vendor SDK or CTI files
 - **DAC settling fix**: Reference acquisition now waits for DAC settling (100 ms) before image capture, rather than after
-- **Explicit pixel format**: Camera is configured to Mono8, removing reliance on device defaults
+- **Configurable pixel format**: Camera pixel format is configurable (Mono8, Mono12, Mono16) via config file, defaulting to Mono8
 - **SIGINT handling**: Added signal handler to reset DAC outputs on interrupt (Ctrl+C)
 - **Error handling**: Structured exception handling with proper camera cleanup on failure
 - **Codebase cleanup**: Translated from French to English; removed unused functions and dead code
@@ -63,6 +63,7 @@ Acquisition parameters in `config_manip.txt`:
 | DIM_ROI | Camera ROI dimension (px). Set to -1 with OFFSET_ROI_X/Y to skip ROI config |
 | OFFSET_ROI_X | Camera ROI X offset (px) |
 | OFFSET_ROI_Y | Camera ROI Y offset (px) |
+| PIXEL_FORMAT | Pixel format: Mono8, Mono12, or Mono16 (default: Mono8) |
 | NB_HOLO | Number of holograms |
 | SCAN_PATTERN | Scan pattern name |
 | VXMIN/VXMAX/VYMIN/VYMAX | Mirror voltage range |
