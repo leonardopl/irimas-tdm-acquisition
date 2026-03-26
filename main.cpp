@@ -63,13 +63,16 @@ void sigint_handler(int sig)
 
 // Function Prototypes
 ArvCamera* SelectAndConnectCamera();
-void ConfigureCamera(ArvCamera* camera, int dimROI, int offsetROI_X, int offsetROI_Y);
+void ConfigureCamera(ArvCamera* camera, int dimROI, int offsetROI_X, int offsetROI_Y,
+                     const string& pixel_format_str);
 ArvStream* StartAcquisition(ArvCamera* camera);
 void StopAcquisition(ArvCamera* camera, ArvStream* stream);
 void AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
-                   string acquis_path, int dimROI, vector<float2D> &Vout_table);
+                   string acquis_path, int dimROI, vector<float2D> &Vout_table,
+                   int bytes_per_pixel, int cv_type);
 void AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
-                         string acquis_path, int dimROI, int offsetROI_X, int offsetROI_Y);
+                         string acquis_path, int dimROI, int offsetROI_X, int offsetROI_Y,
+                         const string& pixel_format_str, int bytes_per_pixel, int cv_type);
 
 int main(int argc, char *argv[])
 {
@@ -91,6 +94,16 @@ int main(int argc, char *argv[])
     int dimROI = extract_val("DIM_ROI", manip_config_path);
     int offsetROI_X = extract_val("OFFSET_ROI_X", manip_config_path);
     int offsetROI_Y = extract_val("OFFSET_ROI_Y", manip_config_path);
+    string pixel_format_str = extract_string("PIXEL_FORMAT", manip_config_path);
+    if (pixel_format_str.empty() ||
+        (pixel_format_str != "Mono8" && pixel_format_str != "Mono12" && pixel_format_str != "Mono16"))
+    {
+        cout << "PIXEL_FORMAT not set or invalid, defaulting to Mono8" << endl;
+        pixel_format_str = "Mono8";
+    }
+    int bytes_per_pixel = (pixel_format_str == "Mono8") ? 1 : 2;
+    int cv_type = (pixel_format_str == "Mono8") ? CV_8UC1 : CV_16UC1;
+
     int NXMAX = extract_val("NXMAX", manip_config_path);
 
     string acquis_dir = acquis_path;
@@ -162,14 +175,16 @@ int main(int argc, char *argv[])
         {
             g_camera_ptr = camera;
 
-            ConfigureCamera(camera, dimROI, offsetROI_X, offsetROI_Y);
+            ConfigureCamera(camera, dimROI, offsetROI_X, offsetROI_Y, pixel_format_str);
 
             // Acquire hologram images
-            AcquireImages(camera, &ljDAC_flower, acquis_path, dimROI, Vout_table);
+            AcquireImages(camera, &ljDAC_flower, acquis_path, dimROI, Vout_table,
+                          bytes_per_pixel, cv_type);
 
             // Acquire reference intensity if needed
             if(b_AmpliRef == 1)
-                AcquireIntensityRef(camera, &ljDAC_flower, acquis_path, dimROI, offsetROI_X, offsetROI_Y);
+                AcquireIntensityRef(camera, &ljDAC_flower, acquis_path, dimROI, offsetROI_X, offsetROI_Y,
+                                    pixel_format_str, bytes_per_pixel, cv_type);
 
             cout << "Closing camera" << endl;
             g_object_unref(camera);
@@ -271,7 +286,8 @@ ArvCamera* SelectAndConnectCamera()
 }
 
 // Configure camera ROI and settings
-void ConfigureCamera(ArvCamera* camera, int dimROI, int offsetROI_X, int offsetROI_Y)
+void ConfigureCamera(ArvCamera* camera, int dimROI, int offsetROI_X, int offsetROI_Y,
+                     const string& pixel_format_str)
 {
     GError* error = NULL;
 
@@ -292,7 +308,7 @@ void ConfigureCamera(ArvCamera* camera, int dimROI, int offsetROI_X, int offsetR
     }
 
     // Set pixel format
-    arv_camera_set_pixel_format_from_string(camera, "Mono8", &error);
+    arv_camera_set_pixel_format_from_string(camera, pixel_format_str.c_str(), &error);
     if (error)
     {
         cout << "Error setting pixel format: " << error->message << endl;
@@ -377,7 +393,8 @@ void StopAcquisition(ArvCamera* camera, ArvStream* stream)
 
 // Acquire hologram images
 void AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
-                   string acquis_path, int dimROI, vector<float2D> &Vout_table)
+                   string acquis_path, int dimROI, vector<float2D> &Vout_table,
+                   int bytes_per_pixel, int cv_type)
 {
     cout << "Starting acquisition..." << endl;
 
@@ -433,12 +450,12 @@ void AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
                 if (current_fps == 0) current_fps = instant_fps;
                 else current_fps = (1.0 - alpha) * current_fps + alpha * instant_fps;
 
-                // Bandwidth in MB/s (1 pixel = 1 byte for Mono8)
-                double frameBytes = (double)lWidth * (double)lHeight;
+                // Bandwidth in MB/s
+                double frameBytes = (double)lWidth * (double)lHeight * bytes_per_pixel;
                 bandwidth_MBps = (frameBytes * current_fps) / 1000000.0;
             }
 
-            cv::Mat lframe(lHeight, lWidth, CV_8UC1, (uint8_t*)data);
+            cv::Mat lframe(lHeight, lWidth, cv_type, const_cast<void*>(data));
 
             // imwrite before pushing buffer back (data pointer invalidated after push)
             imwrite(acquis_path + format("/i%03zu.pgm", img_count), lframe);
@@ -479,13 +496,14 @@ void AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
 
 // Acquire reference intensity image
 void AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
-                         string acquis_path, int dimROI, int offsetROI_X, int offsetROI_Y)
+                         string acquis_path, int dimROI, int offsetROI_X, int offsetROI_Y,
+                         const string& pixel_format_str, int bytes_per_pixel, int cv_type)
 {
     // Set reference voltages
     DAC_tiptilt->set_A_output(0);
     DAC_tiptilt->set_B_output(8);
 
-    ConfigureCamera(camera, dimROI, offsetROI_X, offsetROI_Y);
+    ConfigureCamera(camera, dimROI, offsetROI_X, offsetROI_Y, pixel_format_str);
 
     cout << endl << "##-- Reference Acquisition --##" << endl;
 
@@ -510,7 +528,7 @@ void AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
 
         cout << "  W: " << lWidth << " H: " << lHeight << endl;
 
-        cv::Mat lframe(lHeight, lWidth, CV_8UC1, (uint8_t*)data);
+        cv::Mat lframe(lHeight, lWidth, cv_type, const_cast<void*>(data));
 
         // imwrite before pushing buffer back
         imwrite(acquis_path + "/Intensite_ref.pgm", lframe);
