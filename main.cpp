@@ -119,7 +119,7 @@ int main(int argc, char *argv[])
                         abs(extract_val("VYMAX", manip_config_path))) * NAcondLim / 20;
 
     VfOffset.x = (extract_val("VXMIN", manip_config_path) * NAcondLim + tiptilt_factor_x * 10);
-    VfOffset.y = (extract_val("VYMIN", manip_config_path) * NAcondLim + tiptilt_factor_y * 10) * NAcondLim;
+    VfOffset.y = (extract_val("VYMIN", manip_config_path) * NAcondLim + tiptilt_factor_y * 10);
     b_AmpliRef = extract_val("AMPLI_REF", recon_path);
 
     cout << "  ####################################" << endl;
