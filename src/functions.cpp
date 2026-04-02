@@ -4,6 +4,42 @@
 #include <chrono>
 #define PI 3.14159
 
+map<string, string> parse_args(int argc, char *argv[])
+{
+    map<string, string> overrides;
+    for (int i = 1; i < argc - 1; i += 2)
+    {
+        string arg = argv[i];
+        if (arg.substr(0, 2) == "--")
+        {
+            overrides[arg.substr(2)] = argv[i + 1];
+        }
+    }
+    return overrides;
+}
+
+float get_val(const string& key, const string& file_path, const map<string, string>& overrides)
+{
+    auto it = overrides.find(key);
+    if (it != overrides.end())
+    {
+        cout << key << "=" << it->second << " (from args)" << endl;
+        return atof(it->second.c_str());
+    }
+    return extract_val(key, file_path);
+}
+
+string get_string(const string& key, const string& file_path, const map<string, string>& overrides)
+{
+    auto it = overrides.find(key);
+    if (it != overrides.end())
+    {
+        cout << key << "=" << it->second << " (from args)" << endl;
+        return it->second;
+    }
+    return extract_string(key, file_path);
+}
+
 int clear_acquisition(string  rep, string chemin_config_manip,string chemin_recon)
 {
     const char * rep_c=rep.c_str();
