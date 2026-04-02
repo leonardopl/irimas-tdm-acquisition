@@ -78,6 +78,8 @@ int main(int argc, char *argv[])
 {
     cout << "########################## ACQUISITION ##################################" << endl;
 
+    map<string, string> args = parse_args(argc, argv);
+
     // Initialize paths and configuration
     string gui_config_path, recon_path, manip_config_path, acquis_path, config_dir;
     string home = getenv("HOME");
@@ -85,16 +87,16 @@ int main(int argc, char *argv[])
     gui_config_path = getenv("HOME") + gui_tomo_suffix;
     cout << "Reading paths from " << gui_config_path << endl;
 
-    config_dir = extract_string("CHEMIN_CONFIG", home + gui_tomo_suffix);
-    acquis_path = extract_string("CHEMIN_ACQUIS", home + gui_tomo_suffix);
+    config_dir = get_string("CHEMIN_CONFIG", home + gui_tomo_suffix, args);
+    acquis_path = get_string("CHEMIN_ACQUIS", home + gui_tomo_suffix, args);
     recon_path = config_dir + "/recon.txt";
     manip_config_path = config_dir + "/config_manip.txt";
     cout << "Config file: " << manip_config_path << endl;
 
-    int dimROI = extract_val("DIM_ROI", manip_config_path);
-    int offsetROI_X = extract_val("OFFSET_ROI_X", manip_config_path);
-    int offsetROI_Y = extract_val("OFFSET_ROI_Y", manip_config_path);
-    string pixel_format_str = extract_string("PIXEL_FORMAT", manip_config_path);
+    int dimROI = get_val("DIM_ROI", manip_config_path, args);
+    int offsetROI_X = get_val("OFFSET_ROI_X", manip_config_path, args);
+    int offsetROI_Y = get_val("OFFSET_ROI_Y", manip_config_path, args);
+    string pixel_format_str = get_string("PIXEL_FORMAT", manip_config_path, args);
     if (pixel_format_str.empty() ||
         (pixel_format_str != "Mono8" && pixel_format_str != "Mono12" && pixel_format_str != "Mono16"))
     {
@@ -104,23 +106,23 @@ int main(int argc, char *argv[])
     int bytes_per_pixel = (pixel_format_str == "Mono8") ? 1 : 2;
     int cv_type = (pixel_format_str == "Mono8") ? CV_8UC1 : CV_16UC1;
 
-    int NXMAX = extract_val("NXMAX", manip_config_path);
+    int NXMAX = get_val("NXMAX", manip_config_path, args);
 
     string acquis_dir = acquis_path;
     Var2D holo_dim = {2*NXMAX, 2*NXMAX};
     clear_acquisition(acquis_dir, manip_config_path, recon_path);
 
     // Extract configuration parameters
-    MAX_IMAGES = extract_val("NB_HOLO", manip_config_path);
-    NAcondLim = extract_val("NA_COND_LIM", manip_config_path);
-    tiptilt_factor_x = (abs(extract_val("VXMIN", manip_config_path)) +
-                        abs(extract_val("VXMAX", manip_config_path))) * NAcondLim / 20;
-    tiptilt_factor_y = (abs(extract_val("VYMIN", manip_config_path)) +
-                        abs(extract_val("VYMAX", manip_config_path))) * NAcondLim / 20;
+    MAX_IMAGES = get_val("NB_HOLO", manip_config_path, args);
+    NAcondLim = get_val("NA_COND_LIM", manip_config_path, args);
+    tiptilt_factor_x = (abs(get_val("VXMIN", manip_config_path, args)) +
+                        abs(get_val("VXMAX", manip_config_path, args))) * NAcondLim / 20;
+    tiptilt_factor_y = (abs(get_val("VYMIN", manip_config_path, args)) +
+                        abs(get_val("VYMAX", manip_config_path, args))) * NAcondLim / 20;
 
-    VfOffset.x = (extract_val("VXMIN", manip_config_path) * NAcondLim + tiptilt_factor_x * 10);
-    VfOffset.y = (extract_val("VYMIN", manip_config_path) * NAcondLim + tiptilt_factor_y * 10);
-    b_AmpliRef = extract_val("AMPLI_REF", recon_path);
+    VfOffset.x = (get_val("VXMIN", manip_config_path, args) * NAcondLim + tiptilt_factor_x * 10);
+    VfOffset.y = (get_val("VYMIN", manip_config_path, args) * NAcondLim + tiptilt_factor_y * 10);
+    b_AmpliRef = get_val("AMPLI_REF", recon_path, args);
 
     cout << "  ####################################" << endl;
     cout << "  #  voltage MAX x=" << tiptilt_factor_x*10 << "                   #" << endl;
@@ -142,8 +144,8 @@ int main(int argc, char *argv[])
     signal(SIGINT, sigint_handler);
 
     // Generate voltage lookup table for scan pattern
-    string scan_pattern_str = extract_string("SCAN_PATTERN", manip_config_path);
-    int NbCirclesAnnular = extract_val("NB_CIRCLES_ANNULAR", manip_config_path);
+    string scan_pattern_str = get_string("SCAN_PATTERN", manip_config_path, args);
+    int NbCirclesAnnular = get_val("NB_CIRCLES_ANNULAR", manip_config_path, args);
     cout << "Scan pattern = " << scan_pattern_str << endl;
 
     int const rho = 10; // max voltage for LabJack
