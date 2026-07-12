@@ -32,6 +32,7 @@ using namespace std;
 
 #include "functions.h"
 #include "scan_functions.h"
+#include "scan_schedule.h"
 
 #include <list>
 #include <iomanip>
@@ -67,12 +68,16 @@ void ConfigureCamera(ArvCamera* camera, int dimROI, int offsetROI_X, int offsetR
                      const string& pixel_format_str);
 ArvStream* StartAcquisition(ArvCamera* camera);
 void StopAcquisition(ArvCamera* camera, ArvStream* stream);
-void AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
-                   string acquis_path, int dimROI, vector<float2D> &Vout_table,
-                   int bytes_per_pixel, int cv_type);
-void AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
-                         string acquis_path, int dimROI, int offsetROI_X, int offsetROI_Y,
-                         const string& pixel_format_str, int bytes_per_pixel, int cv_type);
+bool ConfigureSoftwareTrigger(ArvCamera* camera);
+bool AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
+                   const string& acquis_path,
+                   const vector<ScanFrameCommand>& commands,
+                   int settle_ms, int bytes_per_pixel, int cv_type);
+bool AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
+                         const string& acquis_path, int dimROI,
+                         int offsetROI_X, int offsetROI_Y,
+                         const string& pixel_format_str, int settle_ms,
+                         int bytes_per_pixel, int cv_type);
 
 int main(int argc, char *argv[])
 {
@@ -114,6 +119,13 @@ int main(int argc, char *argv[])
 
     // Extract configuration parameters
     MAX_IMAGES = get_val("NB_HOLO", manip_config_path, args);
+    string settle_value = get_string("FSM_SETTLE_MS", manip_config_path, args);
+    int fsm_settle_ms = settle_value.empty() ? 100 : atoi(settle_value.c_str());
+    if (fsm_settle_ms < 0 || fsm_settle_ms > 10000)
+    {
+        cerr << "FSM_SETTLE_MS must be between 0 and 10000" << endl;
+        return 1;
+    }
     NAcondLim = get_val("NA_COND_LIM", manip_config_path, args);
     tiptilt_factor_x = (abs(get_val("VXMIN", manip_config_path, args)) +
                         abs(get_val("VXMAX", manip_config_path, args))) * NAcondLim / 20;
@@ -143,27 +155,40 @@ int main(int argc, char *argv[])
     g_DAC_ptr = &ljDAC_flower;
     signal(SIGINT, sigint_handler);
 
-    // Generate voltage lookup table for scan pattern
+    // Generate one authoritative command per captured image.
     string scan_pattern_str = get_string("SCAN_PATTERN", manip_config_path, args);
     int NbCirclesAnnular = get_val("NB_CIRCLES_ANNULAR", manip_config_path, args);
     cout << "Scan pattern = " << scan_pattern_str << endl;
-
-    int const rho = 10; // max voltage for LabJack
-    int const nbHolo = MAX_IMAGES;
-    vector<float2D> Vout_table(nbHolo);
-    bool scan_pattern_exist = 0;
-
-    if(scan_pattern_str == "ROSACE") { scan_rose(rho, nbHolo, Vout_table); scan_pattern_exist = 1; }
-    if(scan_pattern_str == "FERMAT") { scan_fermat(rho, nbHolo, Vout_table, holo_dim); scan_pattern_exist = 1; }
-    if(scan_pattern_str == "ARCHIMEDE") { scan_spiralOS(rho, nbHolo, Vout_table, 4); scan_pattern_exist = 1; }
-    if(scan_pattern_str == "ANNULAR") { scan_annular(rho, NbCirclesAnnular, nbHolo, Vout_table); scan_pattern_exist = 1; }
-    if(scan_pattern_str == "UNIFORM3D") { scan_uniform3D(rho, nbHolo, Vout_table); scan_pattern_exist = 1; }
-    if(scan_pattern_str == "RANDOM_POLAR") { scan_random_polar3D(rho, nbHolo, Vout_table, holo_dim); scan_pattern_exist = 1; }
-    if(scan_pattern_str == "STAR") { scan_star(rho, nbHolo, 3, Vout_table); scan_pattern_exist = 1; }
-
-    cout << "scan_pattern_exist=" << scan_pattern_exist << endl;
-    if(scan_pattern_exist == 0)
-        cout << "Cannot handle this scan pattern" << endl;
+    vector<ScanFrameCommand> frame_commands;
+    string schedule_error;
+    string seed_value = get_string("SCAN_SEED", manip_config_path, args);
+    const unsigned int random_seed = seed_value.empty()
+        ? static_cast<unsigned int>(time(NULL))
+        : static_cast<unsigned int>(strtoul(seed_value.c_str(), NULL, 10));
+    if (!build_scan_frame_commands(
+            scan_pattern_str, static_cast<int>(MAX_IMAGES), holo_dim,
+            NbCirclesAnnular,
+            get_val("VXMIN", manip_config_path, args),
+            get_val("VXMAX", manip_config_path, args),
+            get_val("VYMIN", manip_config_path, args),
+            get_val("VYMAX", manip_config_path, args),
+            NAcondLim, random_seed, frame_commands, schedule_error))
+    {
+        cerr << "Invalid scan schedule: " << schedule_error << endl;
+        ljDAC_flower.set_A_output(0.0);
+        ljDAC_flower.set_B_output(0.0);
+        return 1;
+    }
+    const string command_table_path = acquis_path + "/fsm_frame_commands.csv";
+    if (!write_scan_frame_commands_csv(command_table_path, frame_commands, schedule_error))
+    {
+        cerr << "Cannot persist scan schedule: " << schedule_error << endl;
+        ljDAC_flower.set_A_output(0.0);
+        ljDAC_flower.set_B_output(0.0);
+        return 1;
+    }
+    cout << "Saved capture-aligned FSM schedule to " << command_table_path << endl;
+    cout << "Scan seed = " << random_seed << endl;
 
     ArvCamera* camera = NULL;
 
@@ -178,15 +203,20 @@ int main(int argc, char *argv[])
             g_camera_ptr = camera;
 
             ConfigureCamera(camera, dimROI, offsetROI_X, offsetROI_Y, pixel_format_str);
+            if (!ConfigureSoftwareTrigger(camera))
+                throw runtime_error("camera does not support reliable software triggering");
 
             // Acquire hologram images
-            AcquireImages(camera, &ljDAC_flower, acquis_path, dimROI, Vout_table,
-                          bytes_per_pixel, cv_type);
+            if (!AcquireImages(camera, &ljDAC_flower, acquis_path, frame_commands,
+                               fsm_settle_ms, bytes_per_pixel, cv_type))
+                throw runtime_error("hologram acquisition did not complete");
 
             // Acquire reference intensity if needed
             if(b_AmpliRef == 1)
-                AcquireIntensityRef(camera, &ljDAC_flower, acquis_path, dimROI, offsetROI_X, offsetROI_Y,
-                                    pixel_format_str, bytes_per_pixel, cv_type);
+                if (!AcquireIntensityRef(camera, &ljDAC_flower, acquis_path, dimROI,
+                                         offsetROI_X, offsetROI_Y, pixel_format_str,
+                                         fsm_settle_ms, bytes_per_pixel, cv_type))
+                    throw runtime_error("reference acquisition did not complete");
 
             cout << "Closing camera" << endl;
             g_object_unref(camera);
@@ -195,11 +225,14 @@ int main(int argc, char *argv[])
         else
         {
             cout << "No camera connected" << endl;
+            throw runtime_error("no camera connected");
         }
     }
     catch (exception& e)
     {
         cout << "Exception: " << e.what() << endl;
+        ljDAC_flower.set_A_output(0.0);
+        ljDAC_flower.set_B_output(0.0);
         if (camera)
         {
             g_object_unref(camera);
@@ -393,21 +426,30 @@ void StopAcquisition(ArvCamera* camera, ArvStream* stream)
     g_object_unref(stream);
 }
 
+bool ConfigureSoftwareTrigger(ArvCamera* camera)
+{
+    GError* error = NULL;
+    arv_camera_set_trigger(camera, "Software", &error);
+    if (error)
+    {
+        cerr << "Cannot configure software trigger: " << error->message << endl;
+        g_error_free(error);
+        return false;
+    }
+    return true;
+}
+
 // Acquire hologram images
-void AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
-                   string acquis_path, int dimROI, vector<float2D> &Vout_table,
-                   int bytes_per_pixel, int cv_type)
+bool AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
+                   const string& acquis_path,
+                   const vector<ScanFrameCommand>& commands,
+                   int settle_ms, int bytes_per_pixel, int cv_type)
 {
     cout << "Starting acquisition..." << endl;
 
     ArvStream* stream = StartAcquisition(camera);
     if (!stream)
-        return;
-
-    // Initialize DAC
-    float2D Vscan = {0*tiptilt_factor_x, 0*tiptilt_factor_y};
-    DAC_tiptilt->set_A_output(Vscan.x*tiptilt_factor_x + VfOffset.x);
-    DAC_tiptilt->set_B_output(Vscan.y*tiptilt_factor_y + VfOffset.y);
+        return false;
 
     cout << endl << "##-- Hologram Acquisition --##" << endl;
 
@@ -425,14 +467,30 @@ void AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
     vTime.clear();
     vTime.start();
 
-    while (img_count < MAX_IMAGES)
+    while (img_count < commands.size())
     {
+        const ScanFrameCommand& command = commands[img_count];
+        DAC_tiptilt->set_A_output(command.command_vx_v);
+        DAC_tiptilt->set_B_output(command.command_vy_v);
+        std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
+
+        GError* trigger_error = NULL;
+        arv_camera_software_trigger(camera, &trigger_error);
+        if (trigger_error)
+        {
+            cerr << "Software trigger failed for i" << setw(3) << setfill('0')
+                 << img_count << setfill(' ') << ": " << trigger_error->message << endl;
+            g_error_free(trigger_error);
+            StopAcquisition(camera, stream);
+            return false;
+        }
         ArvBuffer* buffer = arv_stream_timeout_pop_buffer(stream, 5000000); // 5s in microseconds
 
         if (buffer == NULL)
         {
             cout << "Error: grab timeout" << endl;
-            break;
+            StopAcquisition(camera, stream);
+            return false;
         }
 
         if (arv_buffer_get_status(buffer) == ARV_BUFFER_STATUS_SUCCESS)
@@ -460,13 +518,14 @@ void AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
             cv::Mat lframe(lHeight, lWidth, cv_type, const_cast<void*>(data));
 
             // imwrite before pushing buffer back (data pointer invalidated after push)
-            imwrite(acquis_path + format("/i%03zu.pgm", img_count), lframe);
-
-            // Update mirrors (DAC) for next image
-            Vscan.x = Vout_table[img_count].x;
-            Vscan.y = Vout_table[img_count].y;
-            DAC_tiptilt->set_A_output(Vscan.x*tiptilt_factor_x + VfOffset.x);
-            DAC_tiptilt->set_B_output(Vscan.y*tiptilt_factor_y + VfOffset.y);
+            if (!imwrite(acquis_path + format("/i%03zu.pgm", img_count), lframe))
+            {
+                cerr << "Failed to write image i" << setw(3) << setfill('0')
+                     << img_count << setfill(' ') << endl;
+                arv_stream_push_buffer(stream, buffer);
+                StopAcquisition(camera, stream);
+                return false;
+            }
 
             img_count++;
 
@@ -476,12 +535,15 @@ void AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
                  << " H: " << lHeight
                  << " | " << current_fps << " FPS "
                  << bandwidth_MBps << " MB/s "
-                 << "(" << img_count << "/" << MAX_IMAGES << ")\r";
+                 << "(" << img_count << "/" << commands.size() << ")\r";
             cout.flush();
         }
         else
         {
             cout << "Error: incomplete buffer received" << endl;
+            arv_stream_push_buffer(stream, buffer);
+            StopAcquisition(camera, stream);
+            return false;
         }
 
         // Always push the buffer back to the stream
@@ -494,12 +556,15 @@ void AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
 
     cout << "Stopping acquisition..." << endl;
     StopAcquisition(camera, stream);
+    return true;
 }
 
 // Acquire reference intensity image
-void AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
-                         string acquis_path, int dimROI, int offsetROI_X, int offsetROI_Y,
-                         const string& pixel_format_str, int bytes_per_pixel, int cv_type)
+bool AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
+                         const string& acquis_path, int dimROI,
+                         int offsetROI_X, int offsetROI_Y,
+                         const string& pixel_format_str, int settle_ms,
+                         int bytes_per_pixel, int cv_type)
 {
     // Set reference voltages
     DAC_tiptilt->set_A_output(0);
@@ -511,12 +576,23 @@ void AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
 
     ArvStream* stream = StartAcquisition(camera);
     if (!stream)
-        return;
+        return false;
 
     // Wait for DAC to settle
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
+
+    GError* trigger_error = NULL;
+    arv_camera_software_trigger(camera, &trigger_error);
+    if (trigger_error)
+    {
+        cerr << "Software trigger failed for reference: " << trigger_error->message << endl;
+        g_error_free(trigger_error);
+        StopAcquisition(camera, stream);
+        return false;
+    }
 
     ArvBuffer* buffer = arv_stream_timeout_pop_buffer(stream, 5000000);
+    bool saved = false;
 
     if (buffer != NULL && arv_buffer_get_status(buffer) == ARV_BUFFER_STATUS_SUCCESS)
     {
@@ -533,8 +609,15 @@ void AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
         cv::Mat lframe(lHeight, lWidth, cv_type, const_cast<void*>(data));
 
         // imwrite before pushing buffer back
-        imwrite(acquis_path + "/Intensite_ref.pgm", lframe);
+        if (!imwrite(acquis_path + "/Intensite_ref.pgm", lframe))
+        {
+            cerr << "Failed to write reference intensity" << endl;
+            arv_stream_push_buffer(stream, buffer);
+            StopAcquisition(camera, stream);
+            return false;
+        }
         cout << "Reference intensity saved to " << acquis_path << endl;
+        saved = true;
 
         arv_stream_push_buffer(stream, buffer);
     }
@@ -546,4 +629,5 @@ void AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
     }
 
     StopAcquisition(camera, stream);
+    return saved;
 }
