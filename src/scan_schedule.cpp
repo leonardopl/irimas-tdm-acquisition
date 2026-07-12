@@ -12,6 +12,9 @@ namespace {
 
 const double kNormalizedLimit = 10.0;
 const double kCommandLimit = 10.0;
+const double kFastSettleStepLimitVolts = 0.55;
+const int kFastSettleMilliseconds = 10;
+const int kConservativeSettleMilliseconds = 100;
 
 int uniform3d_generated_count(int frame_count)
 {
@@ -200,4 +203,27 @@ bool write_scan_frame_commands_csv(
         return fail("cannot publish frame-command table: " + path, error);
     }
     return true;
+}
+
+double maximum_scan_command_step_volts(
+    const std::vector<ScanFrameCommand>& commands)
+{
+    double maximum_step = 0.0;
+    for (std::size_t row = 1; row < commands.size(); ++row) {
+        const double delta_x = commands[row].command_vx_v
+            - commands[row - 1].command_vx_v;
+        const double delta_y = commands[row].command_vy_v
+            - commands[row - 1].command_vy_v;
+        maximum_step = std::max(maximum_step, std::hypot(delta_x, delta_y));
+    }
+    return maximum_step;
+}
+
+int default_fsm_settle_ms(const std::vector<ScanFrameCommand>& commands)
+{
+    if (commands.empty())
+        return kConservativeSettleMilliseconds;
+    return maximum_scan_command_step_volts(commands) <= kFastSettleStepLimitVolts
+        ? kFastSettleMilliseconds
+        : kConservativeSettleMilliseconds;
 }

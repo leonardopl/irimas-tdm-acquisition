@@ -120,8 +120,8 @@ int main(int argc, char *argv[])
     // Extract configuration parameters
     MAX_IMAGES = get_val("NB_HOLO", manip_config_path, args);
     string settle_value = get_string("FSM_SETTLE_MS", manip_config_path, args);
-    int fsm_settle_ms = settle_value.empty() ? 100 : atoi(settle_value.c_str());
-    if (fsm_settle_ms < 0 || fsm_settle_ms > 10000)
+    int fsm_settle_ms = settle_value.empty() ? -1 : atoi(settle_value.c_str());
+    if (!settle_value.empty() && (fsm_settle_ms < 0 || fsm_settle_ms > 10000))
     {
         cerr << "FSM_SETTLE_MS must be between 0 and 10000" << endl;
         return 1;
@@ -186,6 +186,25 @@ int main(int argc, char *argv[])
         ljDAC_flower.set_A_output(0.0);
         ljDAC_flower.set_B_output(0.0);
         return 1;
+    }
+    vector<ScanFrameCommand> settling_commands = frame_commands;
+    if (b_AmpliRef == 1) {
+        ScanFrameCommand reference_command = settling_commands.back();
+        reference_command.command_vx_v = 0.0;
+        reference_command.command_vy_v = 8.0;
+        settling_commands.push_back(reference_command);
+    }
+    const double maximum_command_step_volts =
+        maximum_scan_command_step_volts(settling_commands);
+    if (settle_value.empty()) {
+        fsm_settle_ms = default_fsm_settle_ms(settling_commands);
+        cout << "FSM_SETTLE_MS not set; using " << fsm_settle_ms
+             << " ms for a maximum consecutive command step of "
+             << maximum_command_step_volts << " V" << endl;
+    } else {
+        cout << "FSM settle delay = " << fsm_settle_ms
+             << " ms (explicit), maximum consecutive command step = "
+             << maximum_command_step_volts << " V" << endl;
     }
     cout << "Saved capture-aligned FSM schedule to " << command_table_path << endl;
     cout << "Scan seed = " << random_seed << endl;
