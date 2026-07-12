@@ -32,3 +32,9 @@ bool write_scan_frame_commands_csv(
     const std::string& path,
     const std::vector<ScanFrameCommand>& commands,
     std::string& error);
+
+double maximum_scan_command_step_volts(
+    const std::vector<ScanFrameCommand>& commands);
+
+int default_fsm_settle_ms(
+    const std::vector<ScanFrameCommand>& commands);
