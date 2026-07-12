@@ -44,6 +44,7 @@ On other distributions, or to build from source, see the [Aravis documentation](
 
 ```bash
 make
+make test
 ```
 
 ## Configuration
@@ -68,6 +69,8 @@ Acquisition parameters in `config_manip.txt`:
 | SCAN_PATTERN | Scan pattern name |
 | VXMIN/VXMAX/VYMIN/VYMAX | Mirror voltage range |
 | NA_COND_LIM | Condenser NA limit (0-1] |
+| FSM_SETTLE_MS | Delay between a DAC command and its software-triggered exposure (default: 100 ms) |
+| SCAN_SEED | Optional unsigned seed used to reproduce RANDOM_POLAR schedules |
 
 ## Scan Patterns
 
@@ -80,6 +83,11 @@ Acquisition parameters in `config_manip.txt`:
 | UNIFORM3D | Uniform spherical sampling |
 | RANDOM_POLAR | Random polar on sphere |
 | STAR | Radial star axes |
+
+Before capture, the program writes `fsm_frame_commands.csv` beside the images.
+It contains one row per image (`i000` is the centre) and is the authoritative
+record of normalized scan coordinates and commanded DAC voltages. Holograms are
+software-triggered only after the corresponding DAC command has settled.
 
 ## Usage
 

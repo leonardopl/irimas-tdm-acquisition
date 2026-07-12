@@ -27,7 +27,8 @@ LDFLAGS = -L/opt/lib_tomo/labjack \
           -lLjack -llabjackusb -llabjackusbcpp -lmsleep
 
 TARGET = $(BINDIR)/tdm_acquisition
-OBJS   = $(OBJDIR)/main.o $(OBJDIR)/functions.o $(OBJDIR)/scan_functions.o
+OBJS   = $(OBJDIR)/main.o $(OBJDIR)/functions.o $(OBJDIR)/scan_functions.o $(OBJDIR)/scan_schedule.o
+TEST_TARGET = $(BINDIR)/test_scan_schedule
 
 $(TARGET): $(OBJS) | $(BINDIR)
 	$(CXX) -o $@ $^ $(LDFLAGS)
@@ -41,10 +42,19 @@ $(OBJDIR)/functions.o: src/functions.cpp | $(OBJDIR)
 $(OBJDIR)/scan_functions.o: src/scan_functions.cpp | $(OBJDIR)
 	$(CXX) -c $< $(CXXFLAGS) -o $@
 
+$(OBJDIR)/scan_schedule.o: src/scan_schedule.cpp | $(OBJDIR)
+	$(CXX) -c $< $(CXXFLAGS) -o $@
+
+$(TEST_TARGET): tests/test_scan_schedule.cpp src/scan_schedule.cpp src/scan_functions.cpp | $(BINDIR)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+test: $(TEST_TARGET)
+	./$(TEST_TARGET)
+
 $(OBJDIR) $(BINDIR):
 	mkdir -p $@
 
 clean:
-	rm -f $(OBJDIR)/*.o $(TARGET)
+	rm -f $(OBJDIR)/*.o $(TARGET) $(TEST_TARGET)
 
-.PHONY: clean
+.PHONY: clean test
