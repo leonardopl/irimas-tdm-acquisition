@@ -48,6 +48,8 @@ size_t MAX_IMAGES = 0;
 static Ljack_DAC* g_DAC_ptr = NULL;
 static ArvCamera* g_camera_ptr = NULL;
 
+void RestoreFreeRun(ArvCamera* camera);
+
 void sigint_handler(int sig)
 {
     cout << "\nSIGINT received, resetting DAC and shutting down..." << endl;
@@ -57,7 +59,10 @@ void sigint_handler(int sig)
         g_DAC_ptr->set_B_output(0.0);
     }
     if (g_camera_ptr)
+    {
+        RestoreFreeRun(g_camera_ptr);
         g_object_unref(g_camera_ptr);
+    }
     arv_shutdown();
     exit(1);
 }
@@ -238,6 +243,7 @@ int main(int argc, char *argv[])
                     throw runtime_error("reference acquisition did not complete");
 
             cout << "Closing camera" << endl;
+            RestoreFreeRun(camera);
             g_object_unref(camera);
             g_camera_ptr = NULL;
         }
@@ -254,6 +260,7 @@ int main(int argc, char *argv[])
         ljDAC_flower.set_B_output(0.0);
         if (camera)
         {
+            RestoreFreeRun(camera);
             g_object_unref(camera);
             g_camera_ptr = NULL;
         }
@@ -456,6 +463,19 @@ bool ConfigureSoftwareTrigger(ArvCamera* camera)
         return false;
     }
     return true;
+}
+
+// Leave the camera free-running for the next program (the GUI, pylon Viewer):
+// the trigger mode set above persists in the camera until it is power-cycled.
+void RestoreFreeRun(ArvCamera* camera)
+{
+    GError* error = NULL;
+    arv_camera_clear_triggers(camera, &error);
+    if (error)
+    {
+        cerr << "Warning: cannot switch the camera trigger off: " << error->message << endl;
+        g_error_free(error);
+    }
 }
 
 // Acquire hologram images
