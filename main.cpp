@@ -99,9 +99,17 @@ int main(int argc, char *argv[])
 
     config_dir = get_string("CHEMIN_CONFIG", home + gui_tomo_suffix, args);
     acquis_path = get_string("CHEMIN_ACQUIS", home + gui_tomo_suffix, args);
-    recon_path = config_dir + "/recon.txt";
-    manip_config_path = config_dir + "/config_manip.txt";
-    cout << "Config file: " << manip_config_path << endl;
+    string config_error;
+    if (!resolve_config_path(config_dir, "acquisition.conf", "config_manip.txt",
+                             manip_config_path, config_error) ||
+        !resolve_config_path(config_dir, "processing.conf", "recon.txt",
+                             recon_path, config_error))
+    {
+        cerr << config_error << endl;
+        return 1;
+    }
+    cout << "Acquisition config file: " << manip_config_path << endl;
+    cout << "Processing config file: " << recon_path << endl;
 
     int dimROI = get_val("DIM_ROI", manip_config_path, args);
     int offsetROI_X = get_val("OFFSET_ROI_X", manip_config_path, args);

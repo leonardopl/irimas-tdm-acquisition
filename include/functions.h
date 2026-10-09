@@ -18,6 +18,11 @@ using namespace std;
 
 map<string, string> parse_args(int argc, char *argv[]);
 
+// If neither name exists, keep the legacy path and its existing reader diagnostics.
+bool resolve_config_path(const string& config_dir, const string& canonical_name,
+                         const string& legacy_name, string& resolved_path,
+                         string& error);
+
 typedef struct{
 clock_t start, end;
 float   total;

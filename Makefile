@@ -29,14 +29,15 @@ LDFLAGS = -L/opt/lib_tomo/labjack \
 TARGET = $(BINDIR)/tdm_acquisition
 OBJS   = $(OBJDIR)/main.o $(OBJDIR)/functions.o $(OBJDIR)/scan_functions.o $(OBJDIR)/scan_schedule.o
 TEST_TARGET = $(BINDIR)/test_scan_schedule
+CONFIG_TEST_TARGET = $(BINDIR)/test_config_resolution
 
 $(TARGET): $(OBJS) | $(BINDIR)
 	$(CXX) -o $@ $^ $(LDFLAGS)
 
-$(OBJDIR)/main.o: main.cpp | $(OBJDIR)
+$(OBJDIR)/main.o: main.cpp include/functions.h | $(OBJDIR)
 	$(CXX) -c $< $(CXXFLAGS) -o $@
 
-$(OBJDIR)/functions.o: src/functions.cpp | $(OBJDIR)
+$(OBJDIR)/functions.o: src/functions.cpp include/functions.h | $(OBJDIR)
 	$(CXX) -c $< $(CXXFLAGS) -o $@
 
 $(OBJDIR)/scan_functions.o: src/scan_functions.cpp | $(OBJDIR)
@@ -48,13 +49,17 @@ $(OBJDIR)/scan_schedule.o: src/scan_schedule.cpp | $(OBJDIR)
 $(TEST_TARGET): tests/test_scan_schedule.cpp src/scan_schedule.cpp src/scan_functions.cpp | $(BINDIR)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
-test: $(TEST_TARGET)
+$(CONFIG_TEST_TARGET): tests/test_config_resolution.cpp src/functions.cpp include/functions.h | $(BINDIR)
+	$(CXX) $(CXXFLAGS) tests/test_config_resolution.cpp src/functions.cpp -o $@
+
+test: $(TEST_TARGET) $(CONFIG_TEST_TARGET)
 	./$(TEST_TARGET)
+	./$(CONFIG_TEST_TARGET)
 
 $(OBJDIR) $(BINDIR):
 	mkdir -p $@
 
 clean:
-	rm -f $(OBJDIR)/*.o $(TARGET) $(TEST_TARGET)
+	rm -f $(OBJDIR)/*.o $(TARGET) $(TEST_TARGET) $(CONFIG_TEST_TARGET)
 
 .PHONY: clean test

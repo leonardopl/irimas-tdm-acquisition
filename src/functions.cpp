@@ -2,7 +2,47 @@
 #include <tiffio.h>
 #include <dirent.h>
 #include <chrono>
+#include <cerrno>
+#include <sys/stat.h>
 #define PI 3.14159
+
+bool resolve_config_path(const string& config_dir, const string& canonical_name,
+                         const string& legacy_name, string& resolved_path,
+                         string& error)
+{
+    const string canonical_path = config_dir + "/" + canonical_name;
+    const string legacy_path = config_dir + "/" + legacy_name;
+    resolved_path.clear();
+    error.clear();
+    struct stat info;
+    const bool canonical_exists = stat(canonical_path.c_str(), &info) == 0;
+    if (!canonical_exists)
+    {
+        const int stat_error = errno;
+        if (stat_error != ENOENT && stat_error != ENOTDIR)
+        {
+            error = "Cannot inspect config file: " + canonical_path + ": " + strerror(stat_error);
+            return false;
+        }
+    }
+    const bool legacy_exists = stat(legacy_path.c_str(), &info) == 0;
+    if (!legacy_exists)
+    {
+        const int stat_error = errno;
+        if (stat_error != ENOENT && stat_error != ENOTDIR)
+        {
+            error = "Cannot inspect config file: " + legacy_path + ": " + strerror(stat_error);
+            return false;
+        }
+    }
+    if (canonical_exists && legacy_exists)
+    {
+        error = "Ambiguous config files: " + canonical_path + " and " + legacy_path;
+        return false;
+    }
+    resolved_path = canonical_exists ? canonical_path : legacy_path;
+    return true;
+}
 
 map<string, string> parse_args(int argc, char *argv[])
 {

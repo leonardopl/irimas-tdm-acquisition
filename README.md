@@ -57,7 +57,19 @@ Paths are read from `~/.config/gui_tomo.conf`:
 | CHEMIN_ACQUIS | Hologram output directory |
 | CHEMIN_RESULT | Results directory |
 
-Acquisition parameters in `config_manip.txt`:
+Within `CHEMIN_CONFIG`, acquisition parameters are read from `acquisition.conf`,
+falling back to `config_manip.txt`; processing parameters (including `AMPLI_REF`)
+are read from `processing.conf`, falling back to `recon.txt`. If both names for
+either role exist, the program stops with an error naming both files. It prints
+the selected path for each role and never searches `legacy_schema1/` backups.
+If neither name exists, the existing missing-file diagnostics and defaults apply.
+
+The key-value reader ignores unused keys such as `CONFIG_SCHEMA`, `MODALITY`, and
+`QWLSI_MASK_*`; an absent `CONFIG_SCHEMA` remains compatible with schema 1.
+Command-line `--KEY value` overrides still take precedence, including
+`--CHEMIN_CONFIG path`.
+
+Acquisition parameters in `acquisition.conf` (or legacy `config_manip.txt`):
 
 | Parameter | Description |
 |-----------|-------------|
