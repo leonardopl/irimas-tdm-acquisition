@@ -66,7 +66,11 @@ void scan_fermat(double Vmax, int nbHolo, std::vector<float2D> &Vout_table, Var2
 {
     double theta = 0.0;
     double const theta_max = nbHolo;
-    double const golden = 3.0 * sqrt(5.0) * M_PI;
+    // The golden angle, 137.51 deg per point. Until 2026-10-26 this was 3 sqrt(5) pi
+    // (127.48 deg mod 2 pi), which spaced the points less evenly. Each dataset since
+    // 2026-07-12 records its commands in fsm_frame_commands.csv, which processing replays;
+    // qwlsi-gui warns when it has to regenerate a FERMAT scan without that file.
+    double const golden = M_PI * (3.0 - sqrt(5.0));
     double const delta_theta = theta_max / nbHolo;
     double const pixels_per_volt = dim.x / (2.0 * Vmax);
     vector<int> center(static_cast<size_t>(dim.x) * dim.y + 1, 0);

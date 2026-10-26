@@ -1,5 +1,6 @@
 #include "scan_schedule.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -37,10 +38,49 @@ void check_pattern(const std::string& pattern, int frame_count)
     }
 }
 
+// FERMAT steps by the golden angle: the first spiral points, snapped to the grid, are in the
+// table, and the nearest-neighbour spacing is even (CV 0.020; the old 127.48 deg step gave 0.090).
+void check_fermat_golden()
+{
+    const int frames = 400;
+    const double vmax = 10.0;
+    const Var2D dim = {1024, 1024};
+    std::vector<float2D> table(frames);
+    scan_fermat(vmax, frames, table, dim);
+    const int captured = frames - 1;  // the last row is never captured
+
+    const double golden = M_PI * (3.0 - std::sqrt(5.0));
+    const double pixels_per_volt = dim.x / (2.0 * vmax);
+    for (int k = 1; k <= 5; ++k) {
+        const double r = std::sqrt(double(k) / frames) * vmax;
+        const double x = (std::lround(r * std::cos(k * golden) * pixels_per_volt) + dim.x / 2) / pixels_per_volt - vmax;
+        const double y = (std::lround(r * std::sin(k * golden) * pixels_per_volt) + dim.y / 2) / pixels_per_volt - vmax;
+        bool found = false;
+        for (int i = 0; i < captured && !found; ++i)
+            found = std::abs(table[i].x - x) < 1e-4 && std::abs(table[i].y - y) < 1e-4;
+        assert(found);
+    }
+
+    double sum = 0.0, sum2 = 0.0;
+    for (int i = 0; i < captured; ++i) {
+        double nearest = 1e30;
+        for (int j = 0; j < captured; ++j)
+            if (j != i)
+                nearest = std::min(nearest, std::hypot(double(table[i].x - table[j].x), double(table[i].y - table[j].y)));
+        sum += nearest;
+        sum2 += nearest * nearest;
+    }
+    const double mean = sum / captured;
+    const double cv = std::sqrt(std::max(0.0, sum2 / captured - mean * mean)) / mean;
+    std::printf("FERMAT nearest-neighbour spacing CV %.3f\n", cv);
+    assert(cv < 0.05);
+}
+
 } // namespace
 
 int main()
 {
+    check_fermat_golden();
     const char* patterns[] = {
         "ROSACE", "FERMAT", "ARCHIMEDE", "ANNULAR",
         "UNIFORM3D", "RANDOM_POLAR", "STAR"
