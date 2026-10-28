@@ -47,7 +47,7 @@ $(OBJDIR)/scan_functions.o: src/scan_functions.cpp | $(OBJDIR)
 $(OBJDIR)/scan_schedule.o: src/scan_schedule.cpp | $(OBJDIR)
 	$(CXX) -c $< $(CXXFLAGS) -o $@
 
-$(TEST_TARGET): tests/test_scan_schedule.cpp src/scan_schedule.cpp src/scan_functions.cpp include/frame_timing.h | $(BINDIR)
+$(TEST_TARGET): tests/test_scan_schedule.cpp src/scan_schedule.cpp src/scan_functions.cpp include/scan_schedule.h include/scan_functions.h include/frame_timing.h | $(BINDIR)
 	$(CXX) $(CXXFLAGS) tests/test_scan_schedule.cpp src/scan_schedule.cpp src/scan_functions.cpp -o $@
 
 $(CONFIG_TEST_TARGET): tests/test_config_resolution.cpp src/functions.cpp include/functions.h | $(BINDIR)
@@ -61,10 +61,13 @@ test: $(TEST_TARGET) $(CONFIG_TEST_TARGET) $(FRAME_LOOP_TEST_TARGET)
 	./$(CONFIG_TEST_TARGET)
 	./$(FRAME_LOOP_TEST_TARGET)
 
+fermat-fixture: $(TEST_TARGET)
+	./$(TEST_TARGET) --write-fermat-fixture tests/fixtures/fermat_rings_rig_400.csv
+
 $(OBJDIR) $(BINDIR):
 	mkdir -p $@
 
 clean:
 	rm -f $(OBJDIR)/*.o $(TARGET) $(TEST_TARGET) $(CONFIG_TEST_TARGET) $(FRAME_LOOP_TEST_TARGET)
 
-.PHONY: clean test
+.PHONY: clean test fermat-fixture

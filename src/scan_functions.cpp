@@ -61,43 +61,50 @@ void scan_annular(float Vmax, float nb_circle, int nbHolo, std::vector<float2D> 
     }
 }
 
-// Fermat spiral with golden angle spacing
+// Golden-angle Fermat points in equal-area rings from the centre.
+// qwlsi-gui third_party/scan/scan_functions.cpp keeps a verbatim copy.
 void scan_fermat(double Vmax, int nbHolo, std::vector<float2D> &Vout_table, Var2D dim)
 {
-    double theta = 0.0;
-    double const theta_max = nbHolo;
-    // The golden angle, 137.51 deg per point. Until 2026-10-26 this was 3 sqrt(5) pi
-    // (127.48 deg mod 2 pi), which spaced the points less evenly. Each dataset since
-    // 2026-07-12 records its commands in fsm_frame_commands.csv, which processing replays;
-    // qwlsi-gui warns when it has to regenerate a FERMAT scan without that file.
-    double const golden = M_PI * (3.0 - sqrt(5.0));
-    double const delta_theta = theta_max / nbHolo;
-    double const pixels_per_volt = dim.x / (2.0 * Vmax);
-    vector<int> center(static_cast<size_t>(dim.x) * dim.y + 1, 0);
+    (void)dim; // Unused: the points do not depend on a grid.
+    if (nbHolo <= 0)
+        return;
 
-    for (int index = 0; index < nbHolo; ++index) {
-        Vout_table[index].x = sqrt(theta / theta_max) * Vmax * cos(theta * golden);
-        Vout_table[index].y = sqrt(theta / theta_max) * Vmax * sin(theta * golden);
-        int const sx = static_cast<int>(lround(Vout_table[index].x * pixels_per_volt));
-        int const sy = static_cast<int>(lround(Vout_table[index].y * pixels_per_volt));
-        int const x = sx + dim.x / 2;
-        int const y = sy + dim.y / 2;
-        if (x >= 0 && x < dim.x && y >= 0 && y < dim.y)
-            center[static_cast<size_t>(y) * dim.x + x] = index;
-        theta += delta_theta;
+    double const pi = std::acos(-1.0);
+    double const golden = pi * (3.0 - std::sqrt(5.0));
+    int const ring_count = std::max(1,
+        static_cast<int>(std::lround(std::sqrt((nbHolo - 1) / pi))));
+    struct Point {
+        int k;
+        double angle, x, y, relative;
+    };
+    std::vector<std::vector<Point> > rings(ring_count);
+    for (int k = 1; k < nbHolo; ++k) {
+        double const radius = Vmax * std::sqrt(static_cast<double>(k) / nbHolo);
+        double const angle = std::fmod(k * golden, 2.0 * pi);
+        int const ring = std::min(ring_count - 1,
+            static_cast<int>((static_cast<long long>(ring_count) * k) / nbHolo));
+        rings[ring].push_back({k, angle, radius * std::cos(angle), radius * std::sin(angle), 0.0});
     }
 
     int output = 0;
-    for (int flat = 0; flat < dim.x * dim.y && output < nbHolo; ++flat) {
-        int const y = flat / dim.x;
-        int const x = (y % 2 == 0) ? dim.x - flat % dim.x : flat % dim.x;
-        size_t const lookup = static_cast<size_t>(y) * dim.x + x;
-        if (center[lookup] != 0) {
-            Vout_table[output].x = x / pixels_per_volt - Vmax;
-            Vout_table[output].y = y / pixels_per_volt - Vmax;
-            ++output;
+    double last = 0.0;
+    for (int ring = 0; ring < ring_count; ++ring) {
+        std::vector<Point>& points = rings[ring];
+        if (points.empty())
+            continue;
+        for (Point& point : points)
+            point.relative = std::fmod(point.angle - last + 4.0 * pi, 2.0 * pi);
+        std::sort(points.begin(), points.end(), [](const Point& lhs, const Point& rhs) {
+            return lhs.relative != rhs.relative ? lhs.relative < rhs.relative : lhs.k < rhs.k;
+        });
+        if (ring % 2 != 0)
+            std::reverse(points.begin() + 1, points.end());
+        for (const Point& point : points) {
+            Vout_table[output++] = {static_cast<float>(point.x), static_cast<float>(point.y)};
         }
+        last = points.back().angle;
     }
+    Vout_table[nbHolo - 1] = {0.0f, 0.0f}; // Unused by the centre-first frame schedule.
 }
 
 // Random cartesian coordinates within a disk of radius Vmax

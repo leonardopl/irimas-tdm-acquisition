@@ -6,7 +6,9 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -39,29 +41,69 @@ void check_pattern(const std::string& pattern, int frame_count)
     }
 }
 
-// FERMAT steps by the golden angle: the first spiral points, snapped to the grid, are in the
-// table, and the nearest-neighbour spacing is even (CV 0.020; the old 127.48 deg step gave 0.090).
-void check_fermat_golden()
+void check_fermat_rings(int frames)
 {
-    const int frames = 400;
     const double vmax = 10.0;
-    const Var2D dim = {1024, 1024};
-    std::vector<float2D> table(frames);
-    scan_fermat(vmax, frames, table, dim);
+    std::vector<float2D> table(frames, float2D{123.0f, -456.0f});
+    std::vector<float2D> large_grid = table, repeated = table;
+    scan_fermat(vmax, frames, table, Var2D{146, 146});
+    scan_fermat(vmax, frames, large_grid, Var2D{2048, 2048});
+    scan_fermat(vmax, frames, repeated, Var2D{146, 146});
+    for (int i = 0; i < frames; ++i) {
+        assert(table[i].x == large_grid[i].x && table[i].y == large_grid[i].y);
+        assert(table[i].x == repeated[i].x && table[i].y == repeated[i].y);
+        assert(std::hypot(double(table[i].x), double(table[i].y)) <= vmax + 1e-6);
+    }
+    assert(table.back().x == 0.0f && table.back().y == 0.0f);
     const int captured = frames - 1;  // the last row is never captured
 
     const double golden = M_PI * (3.0 - std::sqrt(5.0));
-    const double pixels_per_volt = dim.x / (2.0 * vmax);
-    for (int k = 1; k <= 5; ++k) {
-        const double r = std::sqrt(double(k) / frames) * vmax;
-        const double x = (std::lround(r * std::cos(k * golden) * pixels_per_volt) + dim.x / 2) / pixels_per_volt - vmax;
-        const double y = (std::lround(r * std::sin(k * golden) * pixels_per_volt) + dim.y / 2) / pixels_per_volt - vmax;
-        bool found = false;
-        for (int i = 0; i < captured && !found; ++i)
-            found = std::abs(table[i].x - x) < 1e-4 && std::abs(table[i].y - y) < 1e-4;
-        assert(found);
+    const int ring_count = std::max(1, int(std::lround(std::sqrt((frames - 1) / M_PI))));
+    std::vector<bool> seen(frames, false);
+    std::vector<double> angles(frames);
+    std::vector<std::vector<int> > ring_points(ring_count);
+    int previous_ring = -1;
+    for (int i = 0; i < captured; ++i) {
+        const double x = table[i].x, y = table[i].y;
+        // Recover k from radius alone, then verify the unsnapped spiral coordinates.
+        const int k = int(std::lround((x * x + y * y) * frames / (vmax * vmax)));
+        assert(k >= 1 && k < frames && !seen[k]);
+        seen[k] = true;
+        const double r = vmax * std::sqrt(double(k) / frames);
+        angles[k] = std::fmod(k * golden, 2.0 * M_PI);
+        assert(std::hypot(x - r * std::cos(angles[k]), y - r * std::sin(angles[k])) < 1e-6);
+        const int ring = std::min(ring_count - 1, int((static_cast<long long>(ring_count) * k) / frames));
+        assert(ring >= previous_ring);
+        previous_ring = ring;
+        ring_points[ring].push_back(k);
+    }
+    for (int k = 1; k < frames; ++k)
+        assert(seen[k]);
+
+    // Each ring starts at the smallest relative angle, then walks in alternating directions.
+    double last = 0.0;
+    for (int ring = 0; ring < ring_count; ++ring) {
+        const std::vector<int>& points = ring_points[ring];
+        if (points.empty())
+            continue;
+        const std::pair<double, int> first(
+            std::fmod(angles[points.front()] - last + 4.0 * M_PI, 2.0 * M_PI), points.front());
+        std::pair<double, int> previous = first;
+        for (std::size_t i = 1; i < points.size(); ++i) {
+            const std::pair<double, int> current(
+                std::fmod(angles[points[i]] - last + 4.0 * M_PI, 2.0 * M_PI), points[i]);
+            assert(first < current);
+            if (ring % 2 == 0)
+                assert(previous < current);
+            else if (i > 1)
+                assert(current < previous);
+            previous = current;
+        }
+        last = angles[points.back()];
     }
 
+    if (frames != 400)
+        return;
     double sum = 0.0, sum2 = 0.0;
     for (int i = 0; i < captured; ++i) {
         double nearest = 1e30;
@@ -77,11 +119,85 @@ void check_fermat_golden()
     assert(cv < 0.05);
 }
 
+std::vector<ScanFrameCommand> fermat_rig_commands(Var2D dim = Var2D{146, 146})
+{
+    std::vector<ScanFrameCommand> commands;
+    std::string error;
+    const bool ok = build_scan_frame_commands(
+        "FERMAT", 400, dim, 4,
+        -3.7759, 3.9288, -2.7571, 2.5481, 0.978, 1, commands, error);
+    assert(ok && error.empty());
+    return commands;
+}
+
+void check_fermat_rig_fixture()
+{
+    const std::vector<ScanFrameCommand> commands = fermat_rig_commands();
+    const std::vector<ScanFrameCommand> large_grid = fermat_rig_commands(Var2D{2048, 2048});
+    const std::vector<ScanFrameCommand> repeated = fermat_rig_commands();
+    const double maximum = maximum_scan_command_step_volts(commands);
+    const double p95 = scan_command_step_volts_quantile(commands, 0.95);
+    std::printf("FERMAT rig 400 steps: max %.9f V, p95 %.9f V\n", maximum, p95);
+    assert(maximum <= 0.9);
+    assert(default_fsm_settle_ms(commands) == 10);
+
+    std::ifstream fixture("tests/fixtures/fermat_rings_rig_400.csv");
+    assert(fixture.is_open());
+    std::string line;
+    assert(std::getline(fixture, line));
+    assert(line == "schema_version,image_index,scan_command_index,normalized_scan_x,"
+                   "normalized_scan_y,command_vx_v,command_vy_v");
+    for (std::size_t row = 0; row < commands.size(); ++row) {
+        const ScanFrameCommand& expected = commands[row];
+        for (const ScanFrameCommand* other : {&large_grid[row], &repeated[row]}) {
+            assert(expected.image_index == other->image_index);
+            assert(expected.scan_command_index == other->scan_command_index);
+            assert(expected.normalized_scan_x == other->normalized_scan_x);
+            assert(expected.normalized_scan_y == other->normalized_scan_y);
+            assert(expected.command_vx_v == other->command_vx_v);
+            assert(expected.command_vy_v == other->command_vy_v);
+        }
+        assert(std::getline(fixture, line));
+        std::replace(line.begin(), line.end(), ',', ' ');
+        std::istringstream fields(line);
+        int schema_version = 0;
+        ScanFrameCommand actual = {};
+        assert(fields >> schema_version >> actual.image_index >> actual.scan_command_index
+                      >> actual.normalized_scan_x >> actual.normalized_scan_y
+                      >> actual.command_vx_v >> actual.command_vy_v);
+        fields >> std::ws;
+        assert(fields.eof());
+        assert(schema_version == 1);
+        assert(actual.image_index == expected.image_index);
+        assert(actual.scan_command_index == expected.scan_command_index);
+        assert(std::abs(actual.normalized_scan_x - expected.normalized_scan_x) <= 1e-9);
+        assert(std::abs(actual.normalized_scan_y - expected.normalized_scan_y) <= 1e-9);
+        assert(std::abs(actual.command_vx_v - expected.command_vx_v) <= 1e-9);
+        assert(std::abs(actual.command_vy_v - expected.command_vy_v) <= 1e-9);
+    }
+    assert(!std::getline(fixture, line) && fixture.eof());
+}
+
 } // namespace
 
-int main()
+int main(int argc, char* argv[])
 {
-    check_fermat_golden();
+    if (argc > 1) {
+        if (argc != 3 || std::string(argv[1]) != "--write-fermat-fixture") {
+            std::fprintf(stderr, "Usage: %s [--write-fermat-fixture PATH]\n", argv[0]);
+            return 1;
+        }
+        std::string error;
+        if (!write_scan_frame_commands_csv(argv[2], fermat_rig_commands(), error)) {
+            std::fprintf(stderr, "%s\n", error.c_str());
+            return 1;
+        }
+        return 0;
+    }
+
+    for (int frames : {2, 3, 4, 7, 40, 128, 400, 800})
+        check_fermat_rings(frames);
+    check_fermat_rig_fixture();
     const char* patterns[] = {
         "ROSACE", "FERMAT", "ARCHIMEDE", "ANNULAR",
         "UNIFORM3D", "RANDOM_POLAR", "STAR"
@@ -98,13 +214,6 @@ int main()
         -3.4, 3.4, -2.5, 2.5, 0.8, 1, commands, error));
     assert(std::abs(maximum_scan_command_step_volts(commands) - 0.529872) < 1e-5);
     assert(default_fsm_settle_ms(commands) == 5);
-    assert(build_scan_frame_commands(
-        "FERMAT", 400, Var2D{146, 146}, 4,
-        -3.4, 3.4, -2.5, 2.5, 0.8, 1, commands, error));
-    assert(maximum_scan_command_step_volts(commands) > 0.75);
-    assert(maximum_scan_command_step_volts(commands) <= 6.1);
-    assert(default_fsm_settle_ms(commands) == 10);
-
     assert(!build_scan_frame_commands(
         "UNKNOWN", 40, Var2D{256, 256}, 3,
         -3.0, 5.0, -4.0, 2.0, 0.6, 1, commands, error));

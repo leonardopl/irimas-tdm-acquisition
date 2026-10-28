@@ -91,12 +91,24 @@ Acquisition parameters in `acquisition.conf` (or legacy `config_manip.txt`):
 | Pattern | Description |
 |---------|-------------|
 | ROSACE | Rose (rhodonea) curve |
-| FERMAT | Fermat spiral with golden angle |
+| FERMAT | Golden-angle Fermat points, scanned in equal-area rings from the centre |
 | ARCHIMEDE | Archimedean spiral |
 | ANNULAR | Concentric circles |
 | UNIFORM3D | Uniform spherical sampling |
 | RANDOM_POLAR | Random polar on sphere |
 | STAR | Radial star axes |
+
+Since 2026-10-29, FERMAT uses unsnapped spiral points with no grid and walks
+equal-area rings from the centre outwards, alternating direction in each ring.
+The commands are the same at every wavelength, independent of NXMAX.
+Recorded `fsm_frame_commands.csv` files keep older datasets correct by retaining
+their original coordinates and voltages.
+
+The cross-repository fixture `tests/fixtures/fermat_rings_rig_400.csv` records
+400 frames at VXMIN=-3.7759, VXMAX=3.9288, VYMIN=-2.7571, VYMAX=2.5481 and
+NA_COND_LIM=0.978, including the centre frame. Regenerate it from the repository
+root with `make fermat-fixture`; the hardware-free scan-schedule test checks
+coordinates and voltages against it within 1e-9.
 
 Before capture, the program writes `fsm_frame_commands.csv` beside the images.
 It contains one row per image (`i000` is the centre) and is the authoritative
