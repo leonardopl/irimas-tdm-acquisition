@@ -1,4 +1,5 @@
 #include "scan_schedule.h"
+#include "frame_timing.h"
 
 #include <algorithm>
 #include <cassert>
@@ -161,5 +162,28 @@ int main()
         ++lines;
     assert(lines == 41);
     std::remove(path.c_str());
+
+    // Per-frame timing CSV (B192): header, one row per frame, a failed frame's -1 fields, an unwritable path.
+    std::vector<FrameTiming> timing(2);
+    timing[0].image_index = 0;
+    timing[0].dac_done_ms = 1.25;
+    timing[0].buffer_ms = 17.5;
+    timing[0].written_ms = 20.0;
+    timing[0].frame_id = 7;
+    timing[0].camera_timestamp_ns = 123456789012ULL;
+    timing[1].image_index = 1;
+    const std::string timing_path = "/tmp/irimas_frame_timing_test.csv";
+    assert(write_frame_timing_csv(timing_path, timing, 5, error));
+    std::ifstream timing_input(timing_path.c_str());
+    std::vector<std::string> timing_lines;
+    while (std::getline(timing_input, line))
+        timing_lines.push_back(line);
+    assert(timing_lines.size() == 3);
+    assert(timing_lines[0] == "schema_version,image_index,settle_ms,dac_start_ms,dac_done_ms,trigger_start_ms,"
+                              "trigger_done_ms,buffer_ms,written_ms,frame_id,camera_timestamp_ns,system_timestamp_ns");
+    assert(timing_lines[1] == "1,0,5,0.000,1.250,0.000,0.000,17.500,20.000,7,123456789012,0");
+    assert(timing_lines[2] == "1,1,5,0.000,0.000,0.000,0.000,-1.000,-1.000,0,0,0");
+    std::remove(timing_path.c_str());
+    assert(!write_frame_timing_csv("/nonexistent-dir/frame_timing.csv", timing, 5, error) && !error.empty());
     return 0;
 }

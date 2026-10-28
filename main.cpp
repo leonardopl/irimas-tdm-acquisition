@@ -17,6 +17,7 @@ using namespace std;
 #include "Ljack_DAC.h"
 #include "macros.h"
 #include "vChronos.h"
+#include "frame_timing.h"
 #include <thread>
 #include <chrono>
 
@@ -514,20 +515,42 @@ bool AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
     vTime.clear();
     vTime.start();
 
+    // Per-frame timing (acquis/frame_timing.csv, B192): host ms from the first DAC command, saved after the loop and
+    // after a failed frame. A write failure only warns.
+    std::vector<FrameTiming> timing;
+    timing.reserve(commands.size());
+    const auto timing_origin = std::chrono::steady_clock::now();
+    auto since_origin = [&timing_origin]() {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - timing_origin).count();
+    };
+    auto save_timing = [&]() {
+        std::string timing_error;
+        if (!write_frame_timing_csv(acquis_path + "/frame_timing.csv", timing, settle_ms, timing_error))
+            cerr << "Warning: cannot write the frame timing: " << timing_error << endl;
+    };
+
     while (img_count < commands.size())
     {
         const ScanFrameCommand& command = commands[img_count];
+        FrameTiming row;
+        row.image_index = img_count;
+        row.dac_start_ms = since_origin();
         DAC_tiptilt->set_A_output(command.command_vx_v);
         DAC_tiptilt->set_B_output(command.command_vy_v);
+        row.dac_done_ms = since_origin();
         std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
 
         GError* trigger_error = NULL;
+        row.trigger_start_ms = since_origin();
         arv_camera_software_trigger(camera, &trigger_error);
+        row.trigger_done_ms = since_origin();
         if (trigger_error)
         {
             cerr << "Software trigger failed for i" << setw(3) << setfill('0')
                  << img_count << setfill(' ') << ": " << trigger_error->message << endl;
             g_error_free(trigger_error);
+            timing.push_back(row);
+            save_timing();
             StopAcquisition(camera, stream);
             return false;
         }
@@ -536,9 +559,15 @@ bool AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
         if (buffer == NULL)
         {
             cout << "Error: grab timeout" << endl;
+            timing.push_back(row);
+            save_timing();
             StopAcquisition(camera, stream);
             return false;
         }
+        row.buffer_ms = since_origin();
+        row.frame_id = arv_buffer_get_frame_id(buffer);
+        row.camera_timestamp_ns = arv_buffer_get_timestamp(buffer);
+        row.system_timestamp_ns = arv_buffer_get_system_timestamp(buffer);
 
         if (arv_buffer_get_status(buffer) == ARV_BUFFER_STATUS_SUCCESS)
         {
@@ -570,9 +599,13 @@ bool AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
                 cerr << "Failed to write image i" << setw(3) << setfill('0')
                      << img_count << setfill(' ') << endl;
                 arv_stream_push_buffer(stream, buffer);
+                timing.push_back(row);
+                save_timing();
                 StopAcquisition(camera, stream);
                 return false;
             }
+            row.written_ms = since_origin();
+            timing.push_back(row);
 
             img_count++;
 
@@ -589,6 +622,8 @@ bool AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
         {
             cout << "Error: incomplete buffer received" << endl;
             arv_stream_push_buffer(stream, buffer);
+            timing.push_back(row);
+            save_timing();
             StopAcquisition(camera, stream);
             return false;
         }
@@ -600,6 +635,7 @@ bool AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
     }
 
     cout << endl;
+    save_timing();
 
     cout << "Stopping acquisition..." << endl;
     StopAcquisition(camera, stream);

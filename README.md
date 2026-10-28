@@ -107,6 +107,15 @@ to 6.1 V), where 5 ms left about 5 % of each jump of 1 V or more. Steps beyond 6
 `(0, 8 V)` intensity-reference move is included when enabled.
 An explicit `FSM_SETTLE_MS` always overrides this selection.
 
+After the frames (also after a failed frame) the program writes `frame_timing.csv`
+beside them: one row per frame with the host time of each step of the frame loop in
+ms from the first DAC command (`dac_start_ms`, `dac_done_ms`, `trigger_start_ms`,
+`trigger_done_ms`, `buffer_ms` when the frame arrived, `written_ms` when its file was
+written; -1 when the step did not happen), the settle, and the camera's `frame_id`,
+`camera_timestamp_ns` (camera clock) and `system_timestamp_ns` (host clock at the
+buffer's arrival). It is a diagnostic for the frame-loop timing (qwlsi-gui B192);
+nothing reads it, and older acquisitions do not have it. A failed write only warns.
+
 ## Usage
 
 ```bash
