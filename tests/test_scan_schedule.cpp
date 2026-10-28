@@ -180,9 +180,10 @@ int main()
         timing_lines.push_back(line);
     assert(timing_lines.size() == 3);
     assert(timing_lines[0] == "schema_version,image_index,settle_ms,dac_start_ms,dac_done_ms,trigger_start_ms,"
-                              "trigger_done_ms,buffer_ms,written_ms,frame_id,camera_timestamp_ns,system_timestamp_ns");
-    assert(timing_lines[1] == "1,0,5,0.000,1.250,0.000,0.000,17.500,20.000,7,123456789012,0");
-    assert(timing_lines[2] == "1,1,5,0.000,0.000,0.000,0.000,-1.000,-1.000,0,0,0");
+                              "trigger_done_ms,buffer_ms,written_ms,frame_id,camera_timestamp_ns,system_timestamp_ns,"
+                              "exposure_start_host_ms,next_dac_slack_ms");
+    assert(timing_lines[1] == "2,0,5,0.000,1.250,0.000,0.000,17.500,20.000,7,123456789012,0,,");
+    assert(timing_lines[2] == "2,1,5,0.000,0.000,0.000,0.000,-1.000,-1.000,0,0,0,,");
     std::remove(timing_path.c_str());
     assert(!write_frame_timing_csv("/nonexistent-dir/frame_timing.csv", timing, 5, error) && !error.empty());
     return 0;

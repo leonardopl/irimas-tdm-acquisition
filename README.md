@@ -82,6 +82,8 @@ Acquisition parameters in `acquisition.conf` (or legacy `config_manip.txt`):
 | VXMIN/VXMAX/VYMIN/VYMAX | Mirror voltage range |
 | NA_COND_LIM | Condenser NA limit (0-1] |
 | FSM_SETTLE_MS | Delay between a DAC command and its software-triggered exposure. If omitted, the generated schedule uses 5 ms when every consecutive command step is at most 0.75 V and 95 % of them at most 0.5 V, 10 ms up to 6.1 V, otherwise 100 ms. |
+| FSM_OVERLAP | 0 (default): sequential acquisition; 1: overlap the next mirror move and previous image write with the current frame transfer. Other values are errors. |
+| FSM_OVERLAP_MARGIN_US | Exposure guard added before the next mirror move, in microseconds (default 500; integer range 0-100000). |
 | SCAN_SEED | Optional unsigned seed used to reproduce RANDOM_POLAR schedules |
 
 ## Scan Patterns
@@ -107,14 +109,86 @@ to 6.1 V), where 5 ms left about 5 % of each jump of 1 V or more. Steps beyond 6
 `(0, 8 V)` intensity-reference move is included when enabled.
 An explicit `FSM_SETTLE_MS` always overrides this selection.
 
+With `FSM_OVERLAP=0` (or unset), each frame keeps the sequential order: DAC A+B,
+relative settle sleep, trigger, pop, write, return buffer. With `FSM_OVERLAP=1`,
+command 0 starts the first settle before the loop. Each iteration waits until its
+DAC command has settled, triggers frame k, waits until trigger return plus exposure
+plus margin, commands k+1 (if any), writes and returns the held buffer for k-1
+(if any), then pops and holds frame k. The last frame is written and returned after
+the loop. Thus mirror movement, settling and disk writes can overlap the USB
+transfer. The next trigger still waits for the current frame to arrive. There are
+no worker threads, and image filenames and pixel data are unchanged.
+
+At startup the program prints the effective mode, margin and camera exposure in
+microseconds. It reads the GUI's retained exposure without changing it. Overlap
+requires a readable positive exposure, `ExposureAuto` off, `SequencerMode` Off
+and `TriggerDelay` zero (microseconds). Absent auto/sequencer/delay nodes are allowed;
+unreadable or incompatible values warn and select the sequential loop.
+When sequential mode was requested, a nonfixed exposure produces a note that slack
+checks are skipped, without fallback wording. The separate
+intensity-reference capture is unchanged. Trigger failures, timeouts, incomplete
+buffers and image write failures return all held buffers, save diagnostics and
+stop acquisition.
+
 After the frames (also after a failed frame) the program writes `frame_timing.csv`
-beside them: one row per frame with the host time of each step of the frame loop in
-ms from the first DAC command (`dac_start_ms`, `dac_done_ms`, `trigger_start_ms`,
+beside them: schema version 2 retains the existing columns and their order, with
+one row per commanded frame and the host time of each step of the frame loop in
+ms from a steady-clock origin just before the first DAC command (`dac_start_ms`, `dac_done_ms`, `trigger_start_ms`,
 `trigger_done_ms`, `buffer_ms` when the frame arrived, `written_ms` when its file was
-written; -1 when the step did not happen), the settle, and the camera's `frame_id`,
+written; buffer/written are -1 when unavailable), the settle, and the camera's `frame_id`,
 `camera_timestamp_ns` (camera clock) and `system_timestamp_ns` (host clock at the
-buffer's arrival). It is a diagnostic for the frame-loop timing (qwlsi-gui B192);
-nothing reads it, and older acquisitions do not have it. A failed write only warns.
+buffer's arrival). Two columns are appended: `exposure_start_host_ms`, the camera
+timestamp mapped to the host clock, and `next_dac_slack_ms`, next DAC start minus
+this frame's exposure end. They are empty without a clock mapping; slack is also
+empty for the last frame or when exposure is unavailable/automatic/sequenced. On failure,
+overlap may include the already commanded next frame with no received buffer.
+Older acquisitions retain their schema 1 CSV (or have no timing CSV); no reader
+depends on these diagnostics. Failure to write diagnostic files only warns.
+
+When the camera provides `TimestampLatch` and `TimestampLatchValue` (nanoseconds),
+the program records a camera/host latch before and after the loop. Host times just
+before and after each command bound its uncertainty. The two window midpoints
+give the clock offset and linear drift. Exposure timestamps are interpreted as
+exposure starts. Next-DAC slack below minus the latch uncertainty, or an exposure
+starting before its own DAC completion plus settle minus that uncertainty, marks
+the scan suspect. The raw minimum slack is still reported. These checks use midpoint
+estimates; the latch uncertainty is reported on stdout and in the JSON. Without these nodes,
+latch checks are skipped and the summary says `latch=absent`. Present nodes whose
+latch or clock mapping fails report `latch=failed`. Uncertainty above 0.5 ms, or
+above half `FSM_OVERLAP_MARGIN_US` in overlap mode, makes the summary suspect with
+the note `latch_uncertain`: latch checks are inconclusive.
+
+The summary also reports median/minimum/maximum trigger-to-exposure delays in ms,
+relative to both `trigger_start_ms` (`trigger_start_delay_*_ms`) and
+`trigger_done_ms` (`trigger_done_delay_*_ms`). The expected exposure start is between
+those host trigger times. If the median delay from trigger start is below minus
+the latch uncertainty or above the median trigger-call duration plus uncertainty
+plus 1 ms, the summary is suspect and notes that the timestamp meaning is not the
+exposure start, making slack checks untrustworthy.
+
+Both modes check consecutive frame ids (including duplicates/backward ids),
+report the signed median and maximum absolute camera-spacing minus host
+trigger-return-spacing deviation, and warn if the maximum exceeds 0.5 ms (the
+measured rig deviation was about 0.02 ms). Overlap also checks every next DAC
+command against trigger return plus exposure plus margin. The summary on stdout is:
+
+```text
+[frame-timing] mode=overlap frames=400 id_gaps=0 spacing_dev_max_ms=0.020000 min_slack_ms=0.500000 trigger_start_delay_median_ms=0.150000 trigger_start_delay_min_ms=0.050000 trigger_start_delay_max_ms=0.250000 trigger_done_delay_median_ms=-0.130000 trigger_done_delay_min_ms=-0.230000 trigger_done_delay_max_ms=-0.030000 latch_uncertainty_ms=0.200000 latch=ok verdict=ok
+```
+
+`frame_timing_summary.json` contains the same fields, plus the median deviation,
+violation counts, affected image indices, clock offset, drift in ppm, latch
+uncertainty in ms and both raw camera/host latch windows.
+The JSON also records `requested_mode` (from `FSM_OVERLAP`), `mode` (actually run),
+`fallback_reason` (`null` without a fallback), `settle_ms`, `exposure_us` (`null`
+when unavailable or unreliable), and `margin_us`. A local invalid-exposure check
+in the loop also falls back to sequential order and records its reason.
+`id_gaps` counts nonconsecutive transitions; `frames` counts received buffers.
+Unavailable numbers are `null` in JSON (`na` on
+stdout). A suspect verdict warns and keeps the scan; it does not change the exit
+code. An available but failed/invalid clock latch also warns and marks the timing
+suspect. Hardware timing and camera timestamp semantics still need validation on
+the rig; hardware-free tests cover ordering, buffer cleanup and synthetic clocks.
 
 ## Usage
 

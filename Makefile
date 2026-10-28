@@ -30,11 +30,12 @@ TARGET = $(BINDIR)/tdm_acquisition
 OBJS   = $(OBJDIR)/main.o $(OBJDIR)/functions.o $(OBJDIR)/scan_functions.o $(OBJDIR)/scan_schedule.o
 TEST_TARGET = $(BINDIR)/test_scan_schedule
 CONFIG_TEST_TARGET = $(BINDIR)/test_config_resolution
+FRAME_LOOP_TEST_TARGET = $(BINDIR)/test_frame_loop
 
 $(TARGET): $(OBJS) | $(BINDIR)
 	$(CXX) -o $@ $^ $(LDFLAGS)
 
-$(OBJDIR)/main.o: main.cpp include/functions.h | $(OBJDIR)
+$(OBJDIR)/main.o: main.cpp include/functions.h include/frame_loop.h include/frame_timing.h | $(OBJDIR)
 	$(CXX) -c $< $(CXXFLAGS) -o $@
 
 $(OBJDIR)/functions.o: src/functions.cpp include/functions.h | $(OBJDIR)
@@ -46,20 +47,24 @@ $(OBJDIR)/scan_functions.o: src/scan_functions.cpp | $(OBJDIR)
 $(OBJDIR)/scan_schedule.o: src/scan_schedule.cpp | $(OBJDIR)
 	$(CXX) -c $< $(CXXFLAGS) -o $@
 
-$(TEST_TARGET): tests/test_scan_schedule.cpp src/scan_schedule.cpp src/scan_functions.cpp | $(BINDIR)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+$(TEST_TARGET): tests/test_scan_schedule.cpp src/scan_schedule.cpp src/scan_functions.cpp include/frame_timing.h | $(BINDIR)
+	$(CXX) $(CXXFLAGS) tests/test_scan_schedule.cpp src/scan_schedule.cpp src/scan_functions.cpp -o $@
 
 $(CONFIG_TEST_TARGET): tests/test_config_resolution.cpp src/functions.cpp include/functions.h | $(BINDIR)
 	$(CXX) $(CXXFLAGS) tests/test_config_resolution.cpp src/functions.cpp -o $@
 
-test: $(TEST_TARGET) $(CONFIG_TEST_TARGET)
+$(FRAME_LOOP_TEST_TARGET): tests/test_frame_loop.cpp include/frame_loop.h include/frame_timing.h | $(BINDIR)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+test: $(TEST_TARGET) $(CONFIG_TEST_TARGET) $(FRAME_LOOP_TEST_TARGET)
 	./$(TEST_TARGET)
 	./$(CONFIG_TEST_TARGET)
+	./$(FRAME_LOOP_TEST_TARGET)
 
 $(OBJDIR) $(BINDIR):
 	mkdir -p $@
 
 clean:
-	rm -f $(OBJDIR)/*.o $(TARGET) $(TEST_TARGET) $(CONFIG_TEST_TARGET)
+	rm -f $(OBJDIR)/*.o $(TARGET) $(TEST_TARGET) $(CONFIG_TEST_TARGET) $(FRAME_LOOP_TEST_TARGET)
 
 .PHONY: clean test

@@ -18,6 +18,7 @@ using namespace std;
 #include "macros.h"
 #include "vChronos.h"
 #include "frame_timing.h"
+#include "frame_loop.h"
 #include <thread>
 #include <chrono>
 
@@ -78,7 +79,7 @@ bool ConfigureSoftwareTrigger(ArvCamera* camera);
 bool AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
                    const string& acquis_path,
                    const vector<ScanFrameCommand>& commands,
-                   int settle_ms, int bytes_per_pixel, int cv_type);
+                   FrameLoopOptions options, int bytes_per_pixel, int cv_type);
 bool AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
                          const string& acquis_path, int dimROI,
                          int offsetROI_X, int offsetROI_Y,
@@ -138,6 +139,15 @@ int main(int argc, char *argv[])
     if (!settle_value.empty() && (fsm_settle_ms < 0 || fsm_settle_ms > 10000))
     {
         cerr << "FSM_SETTLE_MS must be between 0 and 10000" << endl;
+        return 1;
+    }
+    FrameLoopOptions frame_loop_options;
+    string frame_loop_error;
+    if (!parse_frame_loop_options(get_string("FSM_OVERLAP", manip_config_path, args),
+                                  get_string("FSM_OVERLAP_MARGIN_US", manip_config_path, args),
+                                  frame_loop_options, frame_loop_error))
+    {
+        cerr << frame_loop_error << endl;
         return 1;
     }
     NAcondLim = get_val("NA_COND_LIM", manip_config_path, args);
@@ -222,6 +232,7 @@ int main(int argc, char *argv[])
     }
     cout << "Saved capture-aligned FSM schedule to " << command_table_path << endl;
     cout << "Scan seed = " << random_seed << endl;
+    frame_loop_options.settle_ms = fsm_settle_ms;
 
     ArvCamera* camera = NULL;
 
@@ -241,7 +252,7 @@ int main(int argc, char *argv[])
 
             // Acquire hologram images
             if (!AcquireImages(camera, &ljDAC_flower, acquis_path, frame_commands,
-                               fsm_settle_ms, bytes_per_pixel, cv_type))
+                               frame_loop_options, bytes_per_pixel, cv_type))
                 throw runtime_error("hologram acquisition did not complete");
 
             // Acquire reference intensity if needed
@@ -487,159 +498,243 @@ void RestoreFreeRun(ArvCamera* camera)
     }
 }
 
+// Read the GUI's retained exposure; never change it or infer an exposure for overlap.
+static bool ReadFixedExposure(ArvCamera* camera, double& exposure_us, bool overlap_requested,
+                              string& fallback_reason)
+{
+    GError* error = NULL;
+    fallback_reason.clear();
+    auto unavailable = [&](const string& reason) {
+        if (overlap_requested)
+            fallback_reason = reason;
+        cerr << frame_exposure_diagnostic(overlap_requested, reason) << endl;
+        return false;
+    };
+    exposure_us = arv_camera_get_exposure_time(camera, &error);
+    if (error || !std::isfinite(exposure_us) || exposure_us <= 0)
+    {
+        const string reason = string("cannot read camera exposure: ") +
+                              (error ? error->message : "invalid ExposureTime");
+        if (error) g_error_free(error);
+        exposure_us = std::numeric_limits<double>::quiet_NaN();
+        return unavailable(reason);
+    }
+    ArvDevice* device = arv_camera_get_device(camera);
+    if (arv_device_get_feature(device, "ExposureAuto"))
+    {
+        const ArvAuto auto_mode = arv_camera_get_exposure_time_auto(camera, &error);
+        if (error || auto_mode != ARV_AUTO_OFF)
+        {
+            const string reason = string("camera exposure auto is not known to be off: ") +
+                                  (error ? error->message : "ExposureAuto enabled");
+            if (error) g_error_free(error);
+            return unavailable(reason);
+        }
+    }
+    if (arv_device_get_feature(device, "SequencerMode"))
+    {
+        const char* mode = arv_device_get_string_feature_value(device, "SequencerMode", &error);
+        if (error || !mode || string(mode) != "Off")
+        {
+            const string reason = string("camera sequencer is not known to be off: ") +
+                                  (error ? error->message : (mode ? mode : "unreadable SequencerMode"));
+            if (error) g_error_free(error);
+            return unavailable(reason);
+        }
+    }
+    if (arv_device_get_feature(device, "TriggerDelay"))
+    {
+        const double delay_us = arv_device_get_float_feature_value(device, "TriggerDelay", &error);
+        if (error || !std::isfinite(delay_us) || delay_us != 0)
+        {
+            const string reason = string("camera TriggerDelay is not known to be zero: ") +
+                                  (error ? error->message : frame_timing_number(delay_us, "unreadable"));
+            if (error) g_error_free(error);
+            return unavailable(reason);
+        }
+    }
+    return true;
+}
+
+// The adapter keeps Aravis, LabJack and OpenCV out of the testable frame order.
+struct AcquisitionFrameIO {
+    typedef ArvBuffer* Buffer;
+    ArvCamera* camera;
+    ArvStream* stream;
+    Ljack_DAC* dac;
+    const string& acquis_path;
+    const vector<ScanFrameCommand>& commands;
+    FrameLoopOptions options;
+    int bytes_per_pixel, cv_type;
+    const std::chrono::steady_clock::time_point origin = std::chrono::steady_clock::now();
+    bool latch_supported;
+    FrameClockLatch first_latch;
+    int doodle_index = 0;
+    double t_last = (double)cv::getTickCount();
+    double current_fps = 0, bandwidth_MBps = 0;
+
+    AcquisitionFrameIO(ArvCamera* camera_, ArvStream* stream_, Ljack_DAC* dac_, const string& path,
+                       const vector<ScanFrameCommand>& commands_, FrameLoopOptions options_, int bytes, int type)
+        : camera(camera_), stream(stream_), dac(dac_), acquis_path(path), commands(commands_),
+          options(options_), bytes_per_pixel(bytes), cv_type(type)
+    {
+        ArvDevice* device = arv_camera_get_device(camera);
+        latch_supported = ARV_IS_GC_COMMAND(arv_device_get_feature(device, "TimestampLatch")) &&
+                          ARV_IS_GC_INTEGER(arv_device_get_feature(device, "TimestampLatchValue"));
+    }
+
+    double now_ms() const {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - origin).count();
+    }
+    void sleep_for_ms(int delay) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+    }
+    void sleep_until_ms(double deadline) {
+        // Round up to a clock tick so conversion cannot put the DAC before the deadline.
+        const auto ticks = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double, std::milli>(deadline));
+        std::this_thread::sleep_until(origin + ticks + std::chrono::steady_clock::duration(1));
+    }
+    FrameClockLatch latch() {
+        FrameClockLatch result;
+        if (!latch_supported)
+            return result;
+        GError* error = NULL;
+        ArvDevice* device = arv_camera_get_device(camera);
+        result.host_before_ms = now_ms();
+        arv_device_execute_command(device, "TimestampLatch", &error);
+        result.host_after_ms = now_ms();
+        gint64 timestamp = 0;
+        if (!error)
+            timestamp = arv_device_get_integer_feature_value(device, "TimestampLatchValue", &error);
+        if (error || timestamp < 0) {
+            cerr << "Warning: camera clock latch failed: " << (error ? error->message : "negative timestamp") << endl;
+            if (error) g_error_free(error);
+            return result;
+        }
+        result.camera_ns = static_cast<std::uint64_t>(timestamp);
+        result.valid = true;
+        return result;
+    }
+    void command(size_t k) {
+        dac->set_A_output(commands[k].command_vx_v);
+        dac->set_B_output(commands[k].command_vy_v);
+    }
+    bool trigger(size_t k) {
+        GError* error = NULL;
+        arv_camera_software_trigger(camera, &error);
+        if (!error)
+            return true;
+        cerr << "Software trigger failed for i" << setw(3) << setfill('0')
+             << k << setfill(' ') << ": " << error->message << endl;
+        g_error_free(error);
+        return false;
+    }
+    Buffer pop(size_t) {
+        Buffer buffer = arv_stream_timeout_pop_buffer(stream, 5000000); // 5s in microseconds
+        if (!buffer) cout << "Error: grab timeout" << endl;
+        return buffer;
+    }
+    void describe(Buffer buffer, FrameTiming& row) {
+        row.frame_id = arv_buffer_get_frame_id(buffer);
+        row.camera_timestamp_ns = arv_buffer_get_timestamp(buffer);
+        row.system_timestamp_ns = arv_buffer_get_system_timestamp(buffer);
+    }
+    bool complete(Buffer buffer) {
+        if (arv_buffer_get_status(buffer) != ARV_BUFFER_STATUS_SUCCESS) {
+            cout << "Error: incomplete buffer received" << endl;
+            return false;
+        }
+        const double t_now = (double)cv::getTickCount();
+        const double dt = (t_now - t_last) / cv::getTickFrequency();
+        t_last = t_now;
+        if (dt > 0) {
+            const double instant_fps = 1.0 / dt;
+            current_fps = current_fps == 0 ? instant_fps : 0.9 * current_fps + 0.1 * instant_fps;
+            const double frame_bytes = (double)arv_buffer_get_image_width(buffer) *
+                                       arv_buffer_get_image_height(buffer) * bytes_per_pixel;
+            bandwidth_MBps = frame_bytes * current_fps / 1000000.0;
+        }
+        return true;
+    }
+    bool write(size_t k, Buffer buffer) {
+        // The buffer stays held until imwrite returns, including when OpenCV throws.
+        try {
+            size_t data_size;
+            const void* data = arv_buffer_get_image_data(buffer, &data_size);
+            cv::Mat frame(arv_buffer_get_image_height(buffer), arv_buffer_get_image_width(buffer),
+                          cv_type, const_cast<void*>(data));
+            if (imwrite(acquis_path + format("/i%03zu.pgm", k), frame))
+                return true;
+        } catch (const std::exception& error) {
+            cerr << "Image write error: " << error.what() << endl;
+        }
+        cerr << "Failed to write image i" << setw(3) << setfill('0') << k << setfill(' ') << endl;
+        return false;
+    }
+    void progress(size_t k, Buffer buffer) {
+        const char doodle[] = "|\\-|-/";
+        cout << fixed << setprecision(1);
+        cout << doodle[doodle_index]
+             << " W: " << arv_buffer_get_image_width(buffer)
+             << " H: " << arv_buffer_get_image_height(buffer)
+             << " | " << current_fps << " FPS " << bandwidth_MBps << " MB/s "
+             << "(" << k + 1 << "/" << commands.size() << ")\r";
+        cout.flush();
+        ++doodle_index %= 6;
+    }
+    void push(Buffer buffer) { arv_stream_push_buffer(stream, buffer); }
+    void finish(vector<FrameTiming>& rows, bool success, const FrameLoopOptions& effective_options) {
+        options = effective_options;
+        const FrameClockMapping clock = frame_clock_mapping(first_latch, latch(), latch_supported);
+        FrameTimingSummary summary = check_frame_timing(rows, options, clock, success);
+        if (clock.failed) {
+            cerr << "Warning: camera clock mapping unavailable; latch-based checks skipped" << endl;
+            summary.suspect = true;
+        }
+        cout << endl << frame_timing_summary_line(summary) << endl;
+        if (summary.suspect)
+            cerr << "Warning: suspect frame timing; see frame_timing_summary.json" << endl;
+        if (summary.timestamp_meaning_suspect)
+            cerr << "Warning: camera timestamp meaning is not the exposure start; slack checks are not trustworthy" << endl;
+        if (summary.latch_uncertain)
+            cerr << "Warning: latch_uncertain; latch checks are inconclusive" << endl;
+        string error;
+        if (!write_frame_timing_csv(acquis_path + "/frame_timing.csv", rows, options.settle_ms, error))
+            cerr << "Warning: cannot write the frame timing: " << error << endl;
+        if (!write_frame_timing_summary(acquis_path + "/frame_timing_summary.json", summary, error))
+            cerr << "Warning: cannot write the frame timing summary: " << error << endl;
+        cout << "Stopping acquisition..." << endl;
+        StopAcquisition(camera, stream);
+    }
+};
+
 // Acquire hologram images
 bool AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
                    const string& acquis_path,
                    const vector<ScanFrameCommand>& commands,
-                   int settle_ms, int bytes_per_pixel, int cv_type)
+                   FrameLoopOptions options, int bytes_per_pixel, int cv_type)
 {
     cout << "Starting acquisition..." << endl;
+    double exposure_us;
+    options.requested_overlap = options.overlap;
+    const bool fixed_exposure = ReadFixedExposure(camera, exposure_us, options.requested_overlap, options.fallback_reason);
+    if (!fixed_exposure)
+        options.overlap = false;
+    // An auto exposure's current value is printed but cannot support a slack check.
+    options.exposure_us = fixed_exposure ? exposure_us : std::numeric_limits<double>::quiet_NaN();
+    cout << "Frame loop mode=" << (options.overlap ? "overlap" : "sequential")
+         << " margin_us=" << options.margin_us << " exposure_us=" << frame_timing_number(exposure_us, "unavailable")
+         << (fixed_exposure ? "" : " (not fixed)") << endl;
 
     ArvStream* stream = StartAcquisition(camera);
     if (!stream)
         return false;
-
     cout << endl << "##-- Hologram Acquisition --##" << endl;
-
-    char lDoodle[] = "|\\-|-/";
-    int lDoodleIndex = 0;
-    size_t img_count = 0;
-
-    // FPS calculation
-    double t_last = (double)cv::getTickCount();
-    double current_fps = 0.0;
-    double bandwidth_MBps = 0.0;
-    double alpha = 0.1; // smoothing factor
-
-    vChronos vTime("image_capture");
-    vTime.clear();
-    vTime.start();
-
-    // Per-frame timing (acquis/frame_timing.csv, B192): host ms from the first DAC command, saved after the loop and
-    // after a failed frame. A write failure only warns.
-    std::vector<FrameTiming> timing;
-    timing.reserve(commands.size());
-    const auto timing_origin = std::chrono::steady_clock::now();
-    auto since_origin = [&timing_origin]() {
-        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - timing_origin).count();
-    };
-    auto save_timing = [&]() {
-        std::string timing_error;
-        if (!write_frame_timing_csv(acquis_path + "/frame_timing.csv", timing, settle_ms, timing_error))
-            cerr << "Warning: cannot write the frame timing: " << timing_error << endl;
-    };
-
-    while (img_count < commands.size())
-    {
-        const ScanFrameCommand& command = commands[img_count];
-        FrameTiming row;
-        row.image_index = img_count;
-        row.dac_start_ms = since_origin();
-        DAC_tiptilt->set_A_output(command.command_vx_v);
-        DAC_tiptilt->set_B_output(command.command_vy_v);
-        row.dac_done_ms = since_origin();
-        std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
-
-        GError* trigger_error = NULL;
-        row.trigger_start_ms = since_origin();
-        arv_camera_software_trigger(camera, &trigger_error);
-        row.trigger_done_ms = since_origin();
-        if (trigger_error)
-        {
-            cerr << "Software trigger failed for i" << setw(3) << setfill('0')
-                 << img_count << setfill(' ') << ": " << trigger_error->message << endl;
-            g_error_free(trigger_error);
-            timing.push_back(row);
-            save_timing();
-            StopAcquisition(camera, stream);
-            return false;
-        }
-        ArvBuffer* buffer = arv_stream_timeout_pop_buffer(stream, 5000000); // 5s in microseconds
-
-        if (buffer == NULL)
-        {
-            cout << "Error: grab timeout" << endl;
-            timing.push_back(row);
-            save_timing();
-            StopAcquisition(camera, stream);
-            return false;
-        }
-        row.buffer_ms = since_origin();
-        row.frame_id = arv_buffer_get_frame_id(buffer);
-        row.camera_timestamp_ns = arv_buffer_get_timestamp(buffer);
-        row.system_timestamp_ns = arv_buffer_get_system_timestamp(buffer);
-
-        if (arv_buffer_get_status(buffer) == ARV_BUFFER_STATUS_SUCCESS)
-        {
-            size_t data_size;
-            const void* data = arv_buffer_get_image_data(buffer, &data_size);
-            size_t lWidth = arv_buffer_get_image_width(buffer);
-            size_t lHeight = arv_buffer_get_image_height(buffer);
-
-            double t_now = (double)cv::getTickCount();
-            double dt = (t_now - t_last) / cv::getTickFrequency();
-            t_last = t_now;
-
-            if (dt > 0)
-            {
-                double instant_fps = 1.0 / dt;
-                if (current_fps == 0) current_fps = instant_fps;
-                else current_fps = (1.0 - alpha) * current_fps + alpha * instant_fps;
-
-                // Bandwidth in MB/s
-                double frameBytes = (double)lWidth * (double)lHeight * bytes_per_pixel;
-                bandwidth_MBps = (frameBytes * current_fps) / 1000000.0;
-            }
-
-            cv::Mat lframe(lHeight, lWidth, cv_type, const_cast<void*>(data));
-
-            // imwrite before pushing buffer back (data pointer invalidated after push)
-            if (!imwrite(acquis_path + format("/i%03zu.pgm", img_count), lframe))
-            {
-                cerr << "Failed to write image i" << setw(3) << setfill('0')
-                     << img_count << setfill(' ') << endl;
-                arv_stream_push_buffer(stream, buffer);
-                timing.push_back(row);
-                save_timing();
-                StopAcquisition(camera, stream);
-                return false;
-            }
-            row.written_ms = since_origin();
-            timing.push_back(row);
-
-            img_count++;
-
-            cout << fixed << setprecision(1);
-            cout << lDoodle[lDoodleIndex]
-                 << " W: " << lWidth
-                 << " H: " << lHeight
-                 << " | " << current_fps << " FPS "
-                 << bandwidth_MBps << " MB/s "
-                 << "(" << img_count << "/" << commands.size() << ")\r";
-            cout.flush();
-        }
-        else
-        {
-            cout << "Error: incomplete buffer received" << endl;
-            arv_stream_push_buffer(stream, buffer);
-            timing.push_back(row);
-            save_timing();
-            StopAcquisition(camera, stream);
-            return false;
-        }
-
-        // Always push the buffer back to the stream
-        arv_stream_push_buffer(stream, buffer);
-
-        ++lDoodleIndex %= 6;
-    }
-
-    cout << endl;
-    save_timing();
-
-    cout << "Stopping acquisition..." << endl;
-    StopAcquisition(camera, stream);
-    return true;
+    AcquisitionFrameIO io(camera, stream, DAC_tiptilt, acquis_path, commands, options, bytes_per_pixel, cv_type);
+    io.first_latch = io.latch();
+    vector<FrameTiming> timing;
+    return run_frame_loop(commands.size(), options, io, timing);
 }
 
 // Acquire reference intensity image
