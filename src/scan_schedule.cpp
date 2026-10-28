@@ -12,8 +12,13 @@ namespace {
 
 const double kNormalizedLimit = 10.0;
 const double kCommandLimit = 10.0;
-const double kFastSettleStepLimitVolts = 0.55;
-const int kFastSettleMilliseconds = 10;
+// Settle tiers measured on the rig (qwlsi-gui B185, 2026-10-28, same bead at 5/10/100/300 ms): 5 ms matched 300 ms
+// on UNIFORM3D steps up to 0.73 V; on FERMAT jumps up to 6.1 V, 5 ms left ~5 % of each step and 10 ms matched 300 ms.
+// Larger steps (the (0, 8 V) intensity-reference move) were not tested and keep 100 ms.
+const double kSmallStepLimitVolts = 0.75;
+const double kTestedStepLimitVolts = 6.1;
+const int kSmallStepSettleMilliseconds = 5;
+const int kSettleMilliseconds = 10;
 const int kConservativeSettleMilliseconds = 100;
 
 int uniform3d_generated_count(int frame_count)
@@ -223,7 +228,8 @@ int default_fsm_settle_ms(const std::vector<ScanFrameCommand>& commands)
 {
     if (commands.empty())
         return kConservativeSettleMilliseconds;
-    return maximum_scan_command_step_volts(commands) <= kFastSettleStepLimitVolts
-        ? kFastSettleMilliseconds
+    const double step = maximum_scan_command_step_volts(commands);
+    return step <= kSmallStepLimitVolts ? kSmallStepSettleMilliseconds
+        : step <= kTestedStepLimitVolts ? kSettleMilliseconds
         : kConservativeSettleMilliseconds;
 }

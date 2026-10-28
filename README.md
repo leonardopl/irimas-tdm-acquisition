@@ -81,7 +81,7 @@ Acquisition parameters in `acquisition.conf` (or legacy `config_manip.txt`):
 | SCAN_PATTERN | Scan pattern name |
 | VXMIN/VXMAX/VYMIN/VYMAX | Mirror voltage range |
 | NA_COND_LIM | Condenser NA limit (0-1] |
-| FSM_SETTLE_MS | Delay between a DAC command and its software-triggered exposure. If omitted, the generated schedule uses 10 ms when every consecutive command step is at most 0.55 V, otherwise 100 ms. |
+| FSM_SETTLE_MS | Delay between a DAC command and its software-triggered exposure. If omitted, the generated schedule uses 5 ms when every consecutive command step is at most 0.75 V, 10 ms up to 6.1 V, otherwise 100 ms. |
 | SCAN_SEED | Optional unsigned seed used to reproduce RANDOM_POLAR schedules |
 
 ## Scan Patterns
@@ -100,9 +100,11 @@ Before capture, the program writes `fsm_frame_commands.csv` beside the images.
 It contains one row per image (`i000` is the centre) and is the authoritative
 record of normalized scan coordinates and commanded DAC voltages. Holograms are
 software-triggered only after the corresponding DAC command has settled.
-The automatic 10 ms path is calibrated for the live 400-frame `UNIFORM3D`
-schedule (0.530 V maximum step). Larger-step schedules retain the conservative
-100 ms default; the `(0, 8 V)` intensity-reference move is included when enabled.
+The automatic settle comes from a rig series (same bead at 5/10/100/300 ms,
+2026-10-28): 5 ms matched 300 ms on a 400-frame `UNIFORM3D` scan (steps up to
+0.73 V), and 10 ms matched 300 ms on `FERMAT` (jumps up to 6.1 V), where 5 ms left
+about 5 % of each jump. Steps beyond 6.1 V were not tested and keep 100 ms; the
+`(0, 8 V)` intensity-reference move is included when enabled.
 An explicit `FSM_SETTLE_MS` always overrides this selection.
 
 ## Usage

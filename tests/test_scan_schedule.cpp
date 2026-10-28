@@ -96,11 +96,13 @@ int main()
         "UNIFORM3D", 400, Var2D{146, 146}, 4,
         -3.4, 3.4, -2.5, 2.5, 0.8, 1, commands, error));
     assert(std::abs(maximum_scan_command_step_volts(commands) - 0.529872) < 1e-5);
-    assert(default_fsm_settle_ms(commands) == 10);
+    assert(default_fsm_settle_ms(commands) == 5);
     assert(build_scan_frame_commands(
         "FERMAT", 400, Var2D{146, 146}, 4,
         -3.4, 3.4, -2.5, 2.5, 0.8, 1, commands, error));
-    assert(default_fsm_settle_ms(commands) == 100);
+    assert(maximum_scan_command_step_volts(commands) > 0.75);
+    assert(maximum_scan_command_step_volts(commands) <= 6.1);
+    assert(default_fsm_settle_ms(commands) == 10);
 
     assert(!build_scan_frame_commands(
         "UNKNOWN", 40, Var2D{256, 256}, 3,
@@ -132,9 +134,16 @@ int main()
     settling_commands[2].command_vx_v = 0.6;
     settling_commands[2].command_vy_v = 0.4;
     assert(std::abs(maximum_scan_command_step_volts(settling_commands) - 0.5) < 1e-12);
+    assert(default_fsm_settle_ms(settling_commands) == 5);
+    settling_commands[2].command_vx_v = 1.04;   // a 0.74 V step: still the small tier
+    assert(default_fsm_settle_ms(settling_commands) == 5);
+    settling_commands[2].command_vx_v = 1.2;    // 0.9 V
     assert(default_fsm_settle_ms(settling_commands) == 10);
-    settling_commands[2].command_vx_v = 1.0;
+    settling_commands[2].command_vx_v = 0.3;    // the intensity-reference move (0, 8 V): untested size
+    settling_commands[2].command_vy_v = 8.0;
     assert(default_fsm_settle_ms(settling_commands) == 100);
+    settling_commands[2].command_vx_v = 0.6;
+    settling_commands[2].command_vy_v = 0.4;
     assert(default_fsm_settle_ms(std::vector<ScanFrameCommand>()) == 100);
 
     const std::string path = "/tmp/irimas_fsm_frame_commands_test.csv";
