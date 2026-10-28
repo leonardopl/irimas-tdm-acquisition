@@ -135,8 +135,14 @@ int main()
     settling_commands[2].command_vy_v = 0.4;
     assert(std::abs(maximum_scan_command_step_volts(settling_commands) - 0.5) < 1e-12);
     assert(default_fsm_settle_ms(settling_commands) == 5);
-    settling_commands[2].command_vx_v = 1.04;   // a 0.74 V step: still the small tier
-    assert(default_fsm_settle_ms(settling_commands) == 5);
+    settling_commands[2].command_vx_v = 1.04;   // a 0.74 V step of two: 95 % of the steps are not small
+    assert(default_fsm_settle_ms(settling_commands) == 10);
+    std::vector<ScanFrameCommand> mostly_small(21);   // 19 steps of 0.4 V, then one of 0.74 V
+    for (std::size_t row = 1; row < mostly_small.size(); ++row)
+        mostly_small[row].command_vx_v = mostly_small[row - 1].command_vx_v + (row + 1 < mostly_small.size() ? 0.4 : 0.74);
+    assert(std::abs(scan_command_step_volts_quantile(mostly_small, 0.95) - 0.4) < 1e-12);
+    assert(default_fsm_settle_ms(mostly_small) == 5);
+    assert(scan_command_step_volts_quantile(std::vector<ScanFrameCommand>(), 0.95) == 0.0);
     settling_commands[2].command_vx_v = 1.2;    // 0.9 V
     assert(default_fsm_settle_ms(settling_commands) == 10);
     settling_commands[2].command_vx_v = 0.3;    // the intensity-reference move (0, 8 V): untested size

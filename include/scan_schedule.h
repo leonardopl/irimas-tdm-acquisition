@@ -36,5 +36,9 @@ bool write_scan_frame_commands_csv(
 double maximum_scan_command_step_volts(
     const std::vector<ScanFrameCommand>& commands);
 
+// The step below which `fraction` of the consecutive steps lie (nearest rank); 0 without steps.
+double scan_command_step_volts_quantile(
+    const std::vector<ScanFrameCommand>& commands, double fraction);
+
 int default_fsm_settle_ms(
     const std::vector<ScanFrameCommand>& commands);

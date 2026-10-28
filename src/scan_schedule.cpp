@@ -13,9 +13,12 @@ namespace {
 const double kNormalizedLimit = 10.0;
 const double kCommandLimit = 10.0;
 // Settle tiers measured on the rig (qwlsi-gui B185, 2026-10-28, same bead at 5/10/100/300 ms): 5 ms matched 300 ms
-// on UNIFORM3D steps up to 0.73 V; on FERMAT jumps up to 6.1 V, 5 ms left ~5 % of each step and 10 ms matched 300 ms.
-// Larger steps (the (0, 8 V) intensity-reference move) were not tested and keep 100 ms.
-const double kSmallStepLimitVolts = 0.75;
+// on UNIFORM3D (95 % of the steps 0.40-0.46 V, at most 0.73 V); on FERMAT jumps up to 6.1 V, 5 ms left ~5 % of each
+// jump of 1 V or more and 10 ms matched 300 ms; 0.5-1 V jumps were not resolved. Larger steps (the (0, 8 V)
+// intensity-reference move) were not tested and keep 100 ms. Same tiers as qwlsi-gui include/fsm_settle.h.
+const double kSmallStepLimitVolts = 0.75;          // largest step
+const double kSmallTypicalStepLimitVolts = 0.5;    // 95th percentile of the steps
+const double kTypicalStepFraction = 0.95;
 const double kTestedStepLimitVolts = 6.1;
 const int kSmallStepSettleMilliseconds = 5;
 const int kSettleMilliseconds = 10;
@@ -224,12 +227,29 @@ double maximum_scan_command_step_volts(
     return maximum_step;
 }
 
+double scan_command_step_volts_quantile(
+    const std::vector<ScanFrameCommand>& commands, double fraction)
+{
+    std::vector<double> steps;
+    for (std::size_t row = 1; row < commands.size(); ++row)
+        steps.push_back(std::hypot(commands[row].command_vx_v - commands[row - 1].command_vx_v,
+                                   commands[row].command_vy_v - commands[row - 1].command_vy_v));
+    if (steps.empty())
+        return 0.0;
+    // nearest rank: the step below which `fraction` of the steps lie
+    const double rank = std::min(std::max(std::ceil(fraction * steps.size()), 1.0), double(steps.size()));
+    const std::size_t index = std::size_t(rank) - 1;
+    std::nth_element(steps.begin(), steps.begin() + index, steps.end());
+    return steps[index];
+}
+
 int default_fsm_settle_ms(const std::vector<ScanFrameCommand>& commands)
 {
     if (commands.empty())
         return kConservativeSettleMilliseconds;
     const double step = maximum_scan_command_step_volts(commands);
-    return step <= kSmallStepLimitVolts ? kSmallStepSettleMilliseconds
+    const double typical = scan_command_step_volts_quantile(commands, kTypicalStepFraction);
+    return step <= kSmallStepLimitVolts && typical <= kSmallTypicalStepLimitVolts ? kSmallStepSettleMilliseconds
         : step <= kTestedStepLimitVolts ? kSettleMilliseconds
         : kConservativeSettleMilliseconds;
 }
