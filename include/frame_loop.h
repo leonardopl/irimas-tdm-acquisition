@@ -2,6 +2,7 @@
 
 #include "frame_timing.h"
 
+#include <cstdio>
 #include <sstream>
 
 struct FrameLoopOptions {
@@ -60,6 +61,7 @@ inline bool parse_frame_loop_options(const std::string& overlap, const std::stri
 }
 
 // IO owns the hardware and clock. Buffer is a nullable handle, kept until write returns.
+// command returns false when a DAC write failed (it is then repeated once).
 // finish saves timing and stops acquisition after every handle is returned, including on failure.
 template<class IO>
 bool run_frame_loop(std::size_t count, FrameLoopOptions options, IO& io,
@@ -82,12 +84,24 @@ bool run_frame_loop(std::size_t count, FrameLoopOptions options, IO& io,
         io.finish(rows, success, options);
         return success;
     };
+    // A failed DAC write is repeated once, immediately. dac_start_ms stays the first attempt's start; dac_done_ms
+    // follows the last attempt, so the settle wait counts from the write that landed. A second failure stops the scan.
     auto command = [&](std::size_t k) {
         rows.push_back(FrameTiming());
         rows[k].image_index = k;
         rows[k].dac_start_ms = io.now_ms();
-        io.command(k);
+        bool written = io.command(k);
+        if (!written) {
+            rows[k].dac_retried = true;
+            written = io.command(k);
+        }
         rows[k].dac_done_ms = io.now_ms();
+        if (!written) {
+            rows[k].dac_failed = true;
+            std::fprintf(stderr, "FSM DAC write failed twice at image %zu: stopping; "
+                                 "check the LabJack U3 USB connection\n", k);
+        }
+        return written;
     };
     auto write = [&](std::size_t k, Buffer buffer) {
         if (!io.write(k, buffer))
@@ -99,10 +113,17 @@ bool run_frame_loop(std::size_t count, FrameLoopOptions options, IO& io,
     if (options.overlap && count > 0)
         command(0);
     for (std::size_t k = 0; k < count; ++k) {
-        if (options.overlap)
+        if (options.overlap) {
+            // Command k failed after frame k - 1's exposure: keep that frame, as a failed trigger k would.
+            if (rows[k].dac_failed) {
+                if (held)
+                    write(k - 1, held);
+                return finish(false);
+            }
             io.sleep_until_ms(rows[k].dac_done_ms + options.settle_ms);
-        else {
-            command(k);
+        } else {
+            if (!command(k))
+                return finish(false);
             io.sleep_for_ms(options.settle_ms); // Preserve the sequential mode's relative wait.
         }
         rows[k].trigger_start_ms = io.now_ms();
@@ -116,7 +137,7 @@ bool run_frame_loop(std::size_t count, FrameLoopOptions options, IO& io,
         if (options.overlap) {
             io.sleep_until_ms(rows[k].trigger_done_ms + (options.exposure_us + options.margin_us) / 1000.0);
             if (k + 1 < count)
-                command(k + 1);
+                command(k + 1); // A failed write stops the scan at the next iteration, after frame k is saved.
             if (held) {
                 if (!write(k - 1, held))
                     return finish(false);

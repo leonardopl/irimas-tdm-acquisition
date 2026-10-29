@@ -64,6 +64,22 @@ class Ljack_DAC {
   void set_A_output(float voltage);
   void set_B_output(float voltage);
 
+  // Failed writes so far (USB transfer or an I2C error code): the library counts them here and otherwise only prints.
+  // A write failed when this rose across it. Inline and no new member: the compiled library's layout is unchanged.
+  // The simulation never calls the library, which then may not initialize the count: 0.
+  unsigned int communication_errors() const { return simulate_p ? 0u : DAC_internal.communication_errors; }
+
+  // Whether the LJTick-DAC acknowledged every byte of the last output (B206). The library compares the I2C ack bits with
+  // the expected 2^(bytes sent + 1) - 1 and only prints "expected an ack"; it does not count a NACK (e.g. a loose tick on
+  // a working U3). Read after each output; stale after a failed USB transfer, which the count above covers. True in
+  // simulation (no output).
+  bool last_output_acknowledged() const {
+    if (simulate_p) return true;
+    const unsigned ack = unsigned(DAC_internal.ackArray[0]) | (unsigned(DAC_internal.ackArray[1]) << 8) |
+                         (unsigned(DAC_internal.ackArray[2]) << 16) | (unsigned(DAC_internal.ackArray[3]) << 24);
+    return ack == (1u << (DAC_internal.numBytesToSend + 1)) - 1u;
+  }
+
 };
 
 

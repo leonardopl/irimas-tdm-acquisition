@@ -146,6 +146,20 @@ intensity-reference capture is unchanged. Trigger failures, timeouts, incomplete
 buffers and image write failures return all held buffers, save diagnostics and
 stop acquisition.
 
+A failed FSM DAC write (USB transfer or I2C error) is otherwise silent: the LabJack
+library only prints it and counts it in its DAC handle, which the program reads
+around each write, and the program checks the I2C acknowledgements of each axis (a
+NACK, e.g. a loose LJTick-DAC on a working U3, is printed but not counted). The frame loop repeats a failed write once, immediately;
+`dac_start_ms` keeps the first attempt's start and `dac_done_ms` follows the repeat,
+so the settle wait counts from the write that landed. A second failure stops the
+scan at that image like a failed trigger (in overlap the frame before it, already
+exposed, is still saved), prints `FSM DAC write failed twice at image k: stopping;
+check the LabJack U3 USB connection` and the run exits non-zero. The scan-centre
+move before the scan and the move to the intensity reference get the same retry and
+stop the run with an error before their frames are taken; the move away after the
+reference frame and the 0 V parks at exit and on Ctrl+C only warn (the reference
+frame is kept; `mirror not parked at 0 V`).
+
 After the frames (also after a failed frame) the program writes `frame_timing.csv`
 beside them: schema version 2 retains the existing columns and their order, with
 one row per commanded frame and the host time of each step of the frame loop in
@@ -157,7 +171,8 @@ buffer's arrival). Two columns are appended: `exposure_start_host_ms`, the camer
 timestamp mapped to the host clock, and `next_dac_slack_ms`, next DAC start minus
 this frame's exposure end. They are empty without a clock mapping; slack is also
 empty for the last frame or when exposure is unavailable/automatic/sequenced. On failure,
-overlap may include the already commanded next frame with no received buffer.
+overlap may include the already commanded next frame with no received buffer, and a
+DAC failure leaves its image's row with no trigger or buffer.
 Older acquisitions retain their schema 1 CSV (or have no timing CSV); no reader
 depends on these diagnostics. Failure to write diagnostic files only warns.
 
@@ -195,7 +210,7 @@ check needs no clock mapping. A maximum above 0.5 ms warns. All 15 good runs on
 command against trigger return plus exposure plus margin. The summary on stdout is:
 
 ```text
-[frame-timing] mode=overlap frames=400 id_gaps=0 spacing_dev_max_ms=0.000000 min_slack_ms=0.500000 trigger_start_delay_median_ms=0.150000 trigger_start_delay_min_ms=0.050000 trigger_start_delay_max_ms=0.250000 trigger_done_delay_median_ms=-0.130000 trigger_done_delay_min_ms=-0.230000 trigger_done_delay_max_ms=-0.030000 latch_uncertainty_ms=0.200000 latch=ok verdict=ok
+[frame-timing] mode=overlap frames=400 id_gaps=0 dac_retries=0 spacing_dev_max_ms=0.000000 min_slack_ms=0.500000 trigger_start_delay_median_ms=0.150000 trigger_start_delay_min_ms=0.050000 trigger_start_delay_max_ms=0.250000 trigger_done_delay_median_ms=-0.130000 trigger_done_delay_min_ms=-0.230000 trigger_done_delay_max_ms=-0.030000 latch_uncertainty_ms=0.200000 latch=ok verdict=ok
 ```
 
 `frame_timing_summary.json` contains the same fields, plus the median deviation,
@@ -206,6 +221,13 @@ The JSON also records `requested_mode` (from `FSM_OVERLAP`), `mode` (actually ru
 when unavailable or unreliable), and `margin_us`. A local invalid-exposure check
 in the loop also falls back to sequential order and records its reason.
 `id_gaps` counts nonconsecutive transitions; `frames` counts received buffers.
+`dac_write_retries` (`dac_retries` on stdout) counts frames whose first DAC write
+failed and whose retry landed, with their indices in `dac_retry_images`; a retry
+alone leaves the verdict,
+since the settle checks count from the repeat. `dac_write_failed` is true when a
+repeat failed too, and makes the timing suspect (the scan is incomplete anyway).
+Summaries written before 29 Oct 2026 lack these three keys: read them as 0, `[]`
+and false.
 Unavailable numbers are `null` in JSON (`na` on
 stdout). A suspect verdict warns and keeps the scan; it does not change the exit
 code. An available but failed/invalid clock latch also warns and marks the timing

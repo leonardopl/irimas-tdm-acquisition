@@ -27,6 +27,9 @@ struct FrameTiming {
     std::uint64_t system_timestamp_ns = 0;
     double exposure_start_host_ms = std::numeric_limits<double>::quiet_NaN();
     double next_dac_slack_ms = std::numeric_limits<double>::quiet_NaN();
+    // Not in the CSV: the first DAC write failed and was repeated; the repeat failed too (the scan stopped here).
+    bool dac_retried = false;
+    bool dac_failed = false;
 };
 
 struct FrameClockLatch {
@@ -125,6 +128,9 @@ struct FrameTimingSummary {
     std::size_t unsettled_frames = 0;
     std::vector<std::size_t> negative_slack_images, unsettled_images;
     std::size_t timestamp_errors = 0;
+    std::size_t dac_write_retries = 0;
+    std::vector<std::size_t> dac_retry_images;
+    bool dac_write_failed = false;
     FrameDelayStatistics trigger_start_delay, trigger_done_delay;
     bool timestamp_meaning_suspect = false;
     bool latch_uncertain = false;
@@ -155,6 +161,13 @@ inline FrameTimingSummary check_frame_timing(std::vector<FrameTiming>& rows, boo
     for (std::size_t k = 0; k < rows.size(); ++k) {
         FrameTiming& row = rows[k];
         row.exposure_start_host_ms = row.next_dac_slack_ms = std::numeric_limits<double>::quiet_NaN();
+        // A retry that landed leaves the verdict: dac_done_ms follows it, so the settle checks still apply. One that
+        // failed too is dac_write_failed only (rig 29 Oct: "DAC write failed, DAC retried 1" read as a landed retry).
+        if (row.dac_retried && !row.dac_failed) {
+            ++summary.dac_write_retries;
+            summary.dac_retry_images.push_back(row.image_index);
+        }
+        summary.dac_write_failed = summary.dac_write_failed || row.dac_failed;
         if (row.buffer_ms < 0) {
             summary.suspect = true;
             continue;
@@ -222,7 +235,7 @@ inline FrameTimingSummary check_frame_timing(std::vector<FrameTiming>& rows, boo
     summary.suspect = summary.suspect || summary.id_gaps || summary.timestamp_errors ||
                       summary.spacing_dev_max_ms > 0.5 || summary.overlap_violations ||
                       summary.negative_slack_frames || summary.unsettled_frames || summary.timestamp_meaning_suspect ||
-                      summary.latch_uncertain;
+                      summary.latch_uncertain || summary.dac_write_failed;
     return summary;
 }
 
@@ -241,6 +254,7 @@ inline std::string frame_timing_summary_line(const FrameTimingSummary& summary)
     std::ostringstream text;
     text << "[frame-timing] mode=" << (summary.overlap ? "overlap" : "sequential")
          << " frames=" << summary.frames << " id_gaps=" << summary.id_gaps
+         << " dac_retries=" << summary.dac_write_retries
          << " spacing_dev_max_ms=" << frame_timing_number(summary.spacing_dev_max_ms)
          << " min_slack_ms=" << frame_timing_number(summary.min_slack_ms, "na")
          << " trigger_start_delay_median_ms=" << frame_timing_number(summary.trigger_start_delay.median_ms, "na")
@@ -332,6 +346,8 @@ inline bool write_frame_timing_summary(const std::string& path, const FrameTimin
          << ",\n  \"negative_slack_frames\": " << summary.negative_slack_frames
          << ",\n  \"unsettled_frames\": " << summary.unsettled_frames
          << ",\n  \"timestamp_errors\": " << summary.timestamp_errors
+         << ",\n  \"dac_write_retries\": " << summary.dac_write_retries
+         << ",\n  \"dac_write_failed\": " << (summary.dac_write_failed ? "true" : "false")
          << ",\n  \"clock_offset_ms\": " << frame_timing_number(summary.clock.valid ? summary.clock.offset_ms : NAN)
          << ",\n  \"clock_drift_ppm\": " << frame_timing_number(summary.clock.valid ? summary.clock.drift_ppm : NAN)
          << ",\n  \"latch_uncertainty_ms\": " << frame_timing_number(summary.clock.valid ? summary.clock.uncertainty_ms : NAN)
@@ -339,7 +355,8 @@ inline bool write_frame_timing_summary(const std::string& path, const FrameTimin
          << ",\n  \"latch_after\": " << frame_clock_latch_json(summary.clock.last)
          << ",\n  \"id_gap_after_images\": " << frame_timing_indices_json(summary.id_gap_after_images)
          << ",\n  \"negative_slack_images\": " << frame_timing_indices_json(summary.negative_slack_images)
-         << ",\n  \"unsettled_images\": " << frame_timing_indices_json(summary.unsettled_images) << "\n}\n";
+         << ",\n  \"unsettled_images\": " << frame_timing_indices_json(summary.unsettled_images)
+         << ",\n  \"dac_retry_images\": " << frame_timing_indices_json(summary.dac_retry_images) << "\n}\n";
     const bool ok = std::fputs(text.str().c_str(), file) >= 0;
     if (std::fclose(file) != 0 || !ok) {
         error = path + ": write failed";

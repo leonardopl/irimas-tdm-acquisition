@@ -52,14 +52,38 @@ static ArvCamera* g_camera_ptr = NULL;
 
 void RestoreFreeRun(ArvCamera* camera);
 
+// The LabJack library prints a failed DAC write and returns: its error counter (USB, I2C error code) and the I2C
+// acknowledgements of each axis (a NACK is not counted) are the only signs.
+static bool WriteFsm(Ljack_DAC* dac, float vx, float vy)
+{
+    const unsigned int errors = dac->communication_errors();
+    dac->set_A_output(vx);
+    const bool acknowledged_a = dac->last_output_acknowledged();
+    dac->set_B_output(vy);
+    return acknowledged_a && dac->last_output_acknowledged() && dac->communication_errors() == errors;
+}
+
+// A move the run depends on: one immediate retry, then the run stops before frames are taken.
+static bool MoveFsm(Ljack_DAC* dac, float vx, float vy, const string& where)
+{
+    if (WriteFsm(dac, vx, vy) || WriteFsm(dac, vx, vy))
+        return true;
+    cerr << "FSM DAC write failed twice " << where << ": stopping; check the LabJack U3 USB connection" << endl;
+    return false;
+}
+
+// The 0 V park at exit only warns.
+static void ParkFsm(Ljack_DAC* dac)
+{
+    if (!WriteFsm(dac, 0.0, 0.0))
+        cerr << "Warning: FSM DAC write failed: mirror not parked at 0 V" << endl;
+}
+
 void sigint_handler(int sig)
 {
     cout << "\nSIGINT received, resetting DAC and shutting down..." << endl;
     if (g_DAC_ptr != NULL)
-    {
-        g_DAC_ptr->set_A_output(0.0);
-        g_DAC_ptr->set_B_output(0.0);
-    }
+        ParkFsm(g_DAC_ptr);
     if (g_camera_ptr)
     {
         RestoreFreeRun(g_camera_ptr);
@@ -172,8 +196,11 @@ int main(int argc, char *argv[])
     Ljack_DAC ljDAC_flower(LU3);
     ASSERT(ljDAC_flower.connect(FIO5_4));
 
-    ljDAC_flower.set_A_output(VfOffset.x);
-    ljDAC_flower.set_B_output(VfOffset.y);
+    if (!MoveFsm(&ljDAC_flower, VfOffset.x, VfOffset.y, "at the scan centre"))
+    {
+        ParkFsm(&ljDAC_flower);
+        return 1;
+    }
 
     // Install SIGINT handler for clean DAC shutdown
     g_DAC_ptr = &ljDAC_flower;
@@ -199,16 +226,14 @@ int main(int argc, char *argv[])
             NAcondLim, random_seed, frame_commands, schedule_error))
     {
         cerr << "Invalid scan schedule: " << schedule_error << endl;
-        ljDAC_flower.set_A_output(0.0);
-        ljDAC_flower.set_B_output(0.0);
+        ParkFsm(&ljDAC_flower);
         return 1;
     }
     const string command_table_path = acquis_path + "/fsm_frame_commands.csv";
     if (!write_scan_frame_commands_csv(command_table_path, frame_commands, schedule_error))
     {
         cerr << "Cannot persist scan schedule: " << schedule_error << endl;
-        ljDAC_flower.set_A_output(0.0);
-        ljDAC_flower.set_B_output(0.0);
+        ParkFsm(&ljDAC_flower);
         return 1;
     }
     vector<ScanFrameCommand> settling_commands = frame_commands;
@@ -276,8 +301,7 @@ int main(int argc, char *argv[])
     catch (exception& e)
     {
         cout << "Exception: " << e.what() << endl;
-        ljDAC_flower.set_A_output(0.0);
-        ljDAC_flower.set_B_output(0.0);
+        ParkFsm(&ljDAC_flower);
         if (camera)
         {
             RestoreFreeRun(camera);
@@ -291,8 +315,7 @@ int main(int argc, char *argv[])
     arv_shutdown();
 
     // Reset DAC outputs
-    ljDAC_flower.set_A_output(0.0);
-    ljDAC_flower.set_B_output(0.0);
+    ParkFsm(&ljDAC_flower);
 
     return 0;
 }
@@ -616,9 +639,8 @@ struct AcquisitionFrameIO {
         result.valid = true;
         return result;
     }
-    void command(size_t k) {
-        dac->set_A_output(commands[k].command_vx_v);
-        dac->set_B_output(commands[k].command_vy_v);
+    bool command(size_t k) {
+        return WriteFsm(dac, commands[k].command_vx_v, commands[k].command_vy_v); // The loop repeats a failure.
     }
     bool trigger(size_t k) {
         GError* error = NULL;
@@ -745,8 +767,8 @@ bool AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
                          int bytes_per_pixel, int cv_type)
 {
     // Set reference voltages
-    DAC_tiptilt->set_A_output(0);
-    DAC_tiptilt->set_B_output(8);
+    if (!MoveFsm(DAC_tiptilt, 0, 8, "for the intensity reference"))
+        return false;
 
     ConfigureCamera(camera, dimROI, offsetROI_X, offsetROI_Y, pixel_format_str);
 
@@ -774,8 +796,11 @@ bool AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
 
     if (buffer != NULL && arv_buffer_get_status(buffer) == ARV_BUFFER_STATUS_SUCCESS)
     {
-        DAC_tiptilt->set_A_output(9.5);
-        DAC_tiptilt->set_B_output(9.5);
+        // The reference frame is already taken at the right position: a failed move away only warns (the exit park
+        // reports a dead U3 as well).
+        if (!WriteFsm(DAC_tiptilt, 9.5, 9.5) && !WriteFsm(DAC_tiptilt, 9.5, 9.5))
+            cerr << "Warning: FSM DAC write failed twice after the intensity reference; the reference frame is kept"
+                 << endl;
 
         size_t data_size;
         const void* data = arv_buffer_get_image_data(buffer, &data_size);

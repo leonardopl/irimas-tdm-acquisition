@@ -2,9 +2,11 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <set>
+#include <unistd.h>
 
 namespace {
 
@@ -23,6 +25,7 @@ struct FakeIO {
     double write_ms = 1.4;
     double ready = 0;
     int timeout_at = -1, write_failure_at = -1, trigger_failure_at = -1, incomplete_at = -1;
+    int dac_failure_at = -1, dac_failures = 0; // The first dac_failures writes of image dac_failure_at fail.
     int finishes = 0;
     bool finished_ok = false;
 
@@ -37,7 +40,14 @@ struct FakeIO {
         events.push_back("sleep_until");
         time = std::max(time, deadline);
     }
-    void command(std::size_t k) { event("dac", k); time += 1.18; }
+    bool command(std::size_t k) {
+        event("dac", k);
+        time += 1.18;
+        if (static_cast<int>(k) != dac_failure_at || dac_failures == 0)
+            return true;
+        --dac_failures;
+        return false;
+    }
     bool trigger(std::size_t k) {
         event("trigger", k);
         time += 0.28;
@@ -99,6 +109,22 @@ FrameLoopOptions options(bool overlap)
     return result;
 }
 
+// The fake camera clock is its host clock in ns: an exact latch, so the settle and slack checks run.
+FrameClockMapping fake_clock()
+{
+    FrameClockLatch first, last;
+    first.valid = last.valid = true;
+    last.camera_ns = 1000000000000ULL;
+    last.host_before_ms = last.host_after_ms = 1000000;
+    return frame_clock_mapping(first, last, true);
+}
+
+std::string summary_json(const FrameTimingSummary& summary);
+std::vector<FrameTiming> synthetic_rows();
+
+bool near(double a, double b) { return std::abs(a - b) < 1e-8; }
+bool contains(const std::string& text, const std::string& part) { return text.find(part) != std::string::npos; }
+
 void check_success(bool overlap, std::size_t count, double transfer = 12, double write = 1.4)
 {
     FakeIO io(count);
@@ -137,18 +163,161 @@ void check_success(bool overlap, std::size_t count, double transfer = 12, double
             }
         }
     }
+    std::vector<std::string> expected;
     if (!overlap) {
-        std::vector<std::string> expected;
         for (std::size_t k = 0; k < count; ++k) {
             const std::string n = std::to_string(k);
             const std::string per_frame[] = {"dac" + n, "sleep_for", "trigger" + n, "pop" + n,
                                               "write" + n, "progress" + n, "push" + n};
             expected.insert(expected.end(), per_frame, per_frame + 7);
         }
-        expected.push_back("save_timing");
-        expected.push_back("stop");
-        assert(io.events == expected);
+    } else {
+        if (count)
+            expected.push_back("dac0");
+        for (std::size_t k = 0; k < count; ++k) {
+            const std::string n = std::to_string(k), previous = std::to_string(k - 1);
+            const std::string start[] = {"sleep_until", "trigger" + n, "sleep_until"};
+            expected.insert(expected.end(), start, start + 3);
+            if (k + 1 < count)
+                expected.push_back("dac" + std::to_string(k + 1));
+            if (k > 0) {
+                const std::string flush[] = {"write" + previous, "progress" + previous, "push" + previous};
+                expected.insert(expected.end(), flush, flush + 3);
+            }
+            expected.push_back("pop" + n);
+        }
+        if (count) {
+            const std::string last = std::to_string(count - 1);
+            const std::string flush[] = {"write" + last, "progress" + last, "push" + last};
+            expected.insert(expected.end(), flush, flush + 3);
+        }
     }
+    expected.push_back("save_timing");
+    expected.push_back("stop");
+    assert(io.events == expected);
+    // Good path: one write per image and the DAC interval of that one write; the new summary keys are zero.
+    for (std::size_t k = 0; k < count; ++k)
+        assert(!rows[k].dac_retried && !rows[k].dac_failed && near(rows[k].dac_done_ms - rows[k].dac_start_ms, 1.18));
+    const FrameTimingSummary summary = check_frame_timing(rows, io.saved_options, fake_clock());
+    assert(!summary.suspect && summary.frames == count);
+    assert(summary.dac_write_retries == 0 && summary.dac_retry_images.empty() && !summary.dac_write_failed);
+    assert(contains(frame_timing_summary_line(summary), " id_gaps=0 dac_retries=0 spacing_dev_max_ms="));
+    const std::string json = summary_json(summary);
+    assert(contains(json, "\"dac_write_retries\": 0,") && contains(json, "\"dac_write_failed\": false,"));
+    assert(contains(json, "\"dac_retry_images\": []\n}"));
+}
+
+// One failed DAC write at image `at`, then a good repeat: the scan completes and the retry is recorded.
+void check_dac_retry(bool overlap, std::size_t at)
+{
+    const std::size_t count = 5;
+    const FrameLoopOptions config = options(overlap);
+    FakeIO clean(count);
+    std::vector<FrameTiming> clean_rows;
+    assert(run_frame_loop(count, config, clean, clean_rows));
+    FakeIO io(count);
+    io.dac_failure_at = static_cast<int>(at);
+    io.dac_failures = 1;
+    std::vector<FrameTiming> rows;
+    assert(run_frame_loop(count, config, io, rows));
+    assert(io.finishes == 1 && io.finished_ok && io.held.empty() && rows.size() == count);
+    assert((io.written == std::vector<std::size_t>{0, 1, 2, 3, 4}));
+    const std::string n = std::to_string(at);
+    assert(std::count(io.events.begin(), io.events.end(), "dac" + n) == 2);
+    const std::size_t first = position(io, "dac" + n);
+    assert(io.events[first + 1] == "dac" + n); // Repeated at once.
+    // Apart from the repeat, the order is the good path's.
+    std::vector<std::string> events = io.events;
+    events.erase(events.begin() + first);
+    assert(events == clean.events);
+    if (overlap && at > 0) {
+        const std::string previous = std::to_string(at - 1);
+        assert(position(io, "trigger" + previous) < first && first + 1 < position(io, "pop" + previous));
+    }
+    for (std::size_t k = 0; k < count; ++k) {
+        assert(rows[k].dac_retried == (k == at) && !rows[k].dac_failed);
+        // dac_start_ms is the first attempt's start, dac_done_ms the repeat's end; the settle counts from it.
+        assert(near(rows[k].dac_done_ms - rows[k].dac_start_ms, k == at ? 2.36 : 1.18));
+        assert(rows[k].trigger_start_ms >= rows[k].dac_done_ms + config.settle_ms - 1e-9);
+    }
+    const FrameTimingSummary summary = check_frame_timing(rows, io.saved_options, fake_clock());
+    const FrameTimingSummary clean_summary = check_frame_timing(clean_rows, clean.saved_options, fake_clock());
+    assert(summary.dac_write_retries == 1 && summary.dac_retry_images == std::vector<std::size_t>{at});
+    assert(!summary.dac_write_failed && summary.frames == count);
+    assert(!summary.suspect && summary.suspect == clean_summary.suspect); // A retry alone keeps the verdict.
+    assert(summary.unsettled_frames == 0 && summary.negative_slack_frames == 0 && summary.overlap_violations == 0);
+    const std::string line = frame_timing_summary_line(summary);
+    assert(contains(line, " dac_retries=1 ") && contains(line, " verdict=ok"));
+    const std::string json = summary_json(summary);
+    assert(contains(json, "\"dac_write_retries\": 1,") && contains(json, "\"dac_write_failed\": false,"));
+    assert(contains(json, "\"dac_retry_images\": [" + n + "]") && contains(json, "\"verdict\": \"ok\""));
+}
+
+// Both DAC writes of image `at` fail: the scan stops there, like a failed trigger, and the timing is suspect.
+void check_dac_failure(bool overlap, std::size_t at)
+{
+    const std::size_t count = 5;
+    FakeIO io(count);
+    io.dac_failure_at = static_cast<int>(at);
+    io.dac_failures = 2;
+    std::vector<FrameTiming> rows;
+    // The loop's stderr line is captured and checked.
+    // A unique file: two checkouts may run make test at the same time.
+    char log_template[] = "/tmp/tdm_frame_loop_stderr_XXXXXX";
+    const int log_fd = mkstemp(log_template);
+    const std::string log_path = log_template;
+    std::fflush(stderr);
+    const int saved_stderr = dup(2);
+    std::FILE* log = log_fd >= 0 ? fdopen(log_fd, "w") : nullptr;
+    assert(saved_stderr >= 0 && log && dup2(fileno(log), 2) == 2);
+    const bool completed = run_frame_loop(count, options(overlap), io, rows);
+    std::fflush(stderr);
+    assert(dup2(saved_stderr, 2) == 2 && close(saved_stderr) == 0 && std::fclose(log) == 0);
+    std::ifstream log_input(log_path.c_str());
+    const std::string logged((std::istreambuf_iterator<char>(log_input)), std::istreambuf_iterator<char>());
+    std::remove(log_path.c_str());
+    assert(logged == "FSM DAC write failed twice at image " + std::to_string(at) +
+                     ": stopping; check the LabJack U3 USB connection\n");
+    assert(!completed && io.finishes == 1 && !io.finished_ok && io.held.empty());
+    assert(rows.size() == at + 1 && io.saved.size() == rows.size());
+    const std::string n = std::to_string(at);
+    assert(std::count(io.events.begin(), io.events.end(), "dac" + n) == 2);
+    assert(std::find(io.events.begin(), io.events.end(), "trigger" + n) == io.events.end());
+    // Every frame before `at` is saved; in overlap frame at - 1 was exposed before the failed write.
+    std::vector<std::size_t> saved;
+    for (std::size_t k = 0; k < at; ++k)
+        saved.push_back(k);
+    assert(io.written == saved);
+    for (std::size_t k = 0; k < count; ++k)
+        assert(io.pushes[k] == (k < at ? 1 : 0));
+    if (overlap && at > 0)
+        assert(position(io, "dac" + n) < position(io, "write" + std::to_string(at - 1)));
+    for (std::size_t k = 0; k < rows.size(); ++k)
+        assert(rows[k].dac_retried == (k == at) && rows[k].dac_failed == (k == at));
+    assert(rows[at].buffer_ms < 0 && rows[at].written_ms < 0);
+    assert(near(rows[at].dac_done_ms - rows[at].dac_start_ms, 2.36));
+    const FrameTimingSummary summary = check_frame_timing(rows, io.saved_options, fake_clock(), false);
+    assert(summary.dac_write_failed && summary.suspect && summary.frames == at);
+    assert(summary.dac_write_retries == 0 && summary.dac_retry_images.empty());   // the failed retry is not a retry
+    assert(contains(frame_timing_summary_line(summary), " dac_retries=0 "));
+    const std::string json = summary_json(summary);
+    assert(contains(json, "\"dac_write_failed\": true,") && contains(json, "\"verdict\": \"suspect\""));
+}
+
+// dac_write_failed alone makes the summary suspect; a retry alone does not.
+void check_dac_summary()
+{
+    auto rows = synthetic_rows();
+    assert(!check_frame_timing(rows, false, 5, 244, 500).suspect);
+    rows[1].dac_retried = rows[2].dac_retried = true;
+    FrameTimingSummary summary = check_frame_timing(rows, true, 5, 244, 500);
+    assert(!summary.suspect && summary.dac_write_retries == 2 && !summary.dac_write_failed);
+    assert((summary.dac_retry_images == std::vector<std::size_t>{1, 2}));
+    assert(contains(summary_json(summary), "\"dac_retry_images\": [1, 2]"));
+    rows[2].dac_failed = true;
+    summary = check_frame_timing(rows, false, 5, 244, 500);
+    assert(summary.suspect && summary.dac_write_failed && summary.dac_write_retries == 1);
+    assert((summary.dac_retry_images == std::vector<std::size_t>{1}));
 }
 
 void check_failure(bool overlap, int kind)
@@ -232,8 +401,6 @@ void check_exposure_diagnostics()
         assert(sequential.find("using sequential") == std::string::npos);
     }
 }
-
-bool near(double a, double b) { return std::abs(a - b) < 1e-8; }
 
 std::vector<FrameTiming> synthetic_rows()
 {
@@ -626,7 +793,7 @@ void check_timing()
     rows = synthetic_rows();
     summary = check_frame_timing(rows, true, 5, 244, 500, clock);
     assert(frame_timing_summary_line(summary) ==
-           "[frame-timing] mode=overlap frames=3 id_gaps=0 spacing_dev_max_ms=0.000000 "
+           "[frame-timing] mode=overlap frames=3 id_gaps=0 dac_retries=0 spacing_dev_max_ms=0.000000 "
            "min_slack_ms=0.756000 trigger_start_delay_median_ms=0.200000 trigger_start_delay_min_ms=0.200000 "
            "trigger_start_delay_max_ms=0.200000 trigger_done_delay_median_ms=0.000000 "
            "trigger_done_delay_min_ms=0.000000 trigger_done_delay_max_ms=0.000000 "
@@ -702,7 +869,12 @@ int main()
         check_success(overlap, 5);
         check_success(overlap, 5, 0.1, 20); // Transfer shorter than guard; disk longer than transfer.
         for (int kind = 0; kind < 7; ++kind) check_failure(overlap, kind);
+        for (std::size_t at : {0, 2, 4}) {
+            check_dac_retry(overlap, at);
+            check_dac_failure(overlap, at);
+        }
     }
+    check_dac_summary();
     check_timing();
     return 0;
 }
