@@ -171,8 +171,11 @@ the scan suspect. The raw minimum slack is still reported. These checks use midp
 estimates; the latch uncertainty is reported on stdout and in the JSON. Without these nodes,
 latch checks are skipped and the summary says `latch=absent`. Present nodes whose
 latch or clock mapping fails report `latch=failed`. Uncertainty above 0.5 ms, or
-above half `FSM_OVERLAP_MARGIN_US` in overlap mode, makes the summary suspect with
-the note `latch_uncertain`: latch checks are inconclusive.
+any finite `next_dac_slack_ms` in `[-uncertainty, uncertainty)`, makes the summary suspect
+with the note `latch_uncertain`: latch checks are inconclusive. This applies in both
+modes. Slack below minus the uncertainty is a proven negative-slack violation and
+does not itself set `latch_uncertain`. The absolute 0.5 ms cap also guards the settle
+check, whose margin cannot be validated from next-DAC slack.
 
 The summary also reports median/minimum/maximum trigger-to-exposure delays in ms,
 relative to both `trigger_start_ms` (`trigger_start_delay_*_ms`) and
@@ -183,13 +186,16 @@ plus 1 ms, the summary is suspect and notes that the timestamp meaning is not th
 exposure start, making slack checks untrustworthy.
 
 Both modes check consecutive frame ids (including duplicates/backward ids),
-report the signed median and maximum absolute camera-spacing minus host
-trigger-return-spacing deviation, and warn if the maximum exceeds 0.5 ms (the
-measured rig deviation was about 0.02 ms). Overlap also checks every next DAC
+report `spacing_dev_median_ms` and `spacing_dev_max_ms` as the signed median and
+maximum absolute excess of camera timestamp spacing outside the allowed trigger-call
+interval `[trigger_start[k] - trigger_done[k-1], trigger_done[k] - trigger_start[k-1]]`.
+Excess is zero inside the interval, negative below it, and positive above it; this
+check needs no clock mapping. A maximum above 0.5 ms warns. All 15 good runs on
+29 Oct had zero excess. Overlap also checks every next DAC
 command against trigger return plus exposure plus margin. The summary on stdout is:
 
 ```text
-[frame-timing] mode=overlap frames=400 id_gaps=0 spacing_dev_max_ms=0.020000 min_slack_ms=0.500000 trigger_start_delay_median_ms=0.150000 trigger_start_delay_min_ms=0.050000 trigger_start_delay_max_ms=0.250000 trigger_done_delay_median_ms=-0.130000 trigger_done_delay_min_ms=-0.230000 trigger_done_delay_max_ms=-0.030000 latch_uncertainty_ms=0.200000 latch=ok verdict=ok
+[frame-timing] mode=overlap frames=400 id_gaps=0 spacing_dev_max_ms=0.000000 min_slack_ms=0.500000 trigger_start_delay_median_ms=0.150000 trigger_start_delay_min_ms=0.050000 trigger_start_delay_max_ms=0.250000 trigger_done_delay_median_ms=-0.130000 trigger_done_delay_min_ms=-0.230000 trigger_done_delay_max_ms=-0.030000 latch_uncertainty_ms=0.200000 latch=ok verdict=ok
 ```
 
 `frame_timing_summary.json` contains the same fields, plus the median deviation,

@@ -132,8 +132,8 @@ struct FrameTimingSummary {
     FrameClockMapping clock;
 };
 
-// Pure apart from filling the two derived row columns. A 0.5 ms spacing deviation warns;
-// the measured rig deviation is about 0.02 ms. Slack and settle checks allow the latch uncertainty.
+// Pure apart from filling the two derived row columns. Spacing excess above 0.5 ms warns;
+// good runs on 29 Oct had zero excess. Slack and settle checks allow the latch uncertainty.
 inline FrameTimingSummary check_frame_timing(std::vector<FrameTiming>& rows, bool overlap,
                                              int settle_ms, double exposure_us, int margin_us,
                                              const FrameClockMapping& clock = FrameClockMapping(),
@@ -146,9 +146,9 @@ inline FrameTimingSummary check_frame_timing(std::vector<FrameTiming>& rows, boo
     summary.exposure_us = exposure_us;
     summary.margin_us = margin_us;
     summary.clock = clock;
-    summary.latch_uncertain = clock.valid && (clock.uncertainty_ms > 0.5 ||
-                              (overlap && clock.uncertainty_ms > margin_us / 2000.0));
-    summary.suspect = !scan_complete || clock.failed || summary.latch_uncertain;
+    // The absolute cap also guards settling, which next-DAC slack cannot validate.
+    summary.latch_uncertain = clock.valid && clock.uncertainty_ms > 0.5;
+    summary.suspect = !scan_complete || clock.failed;
     std::vector<double> deviations;
     std::vector<double> trigger_start_delays, trigger_done_delays, trigger_durations;
     const FrameTiming* previous = NULL;
@@ -169,8 +169,12 @@ inline FrameTimingSummary check_frame_timing(std::vector<FrameTiming>& rows, boo
             }
             if (row.camera_timestamp_ns <= previous->camera_timestamp_ns)
                 ++summary.timestamp_errors;
-            const double deviation = camera_delta_ms(row.camera_timestamp_ns, previous->camera_timestamp_ns) -
-                                     (row.trigger_done_ms - previous->trigger_done_ms);
+            const double spacing = camera_delta_ms(row.camera_timestamp_ns, previous->camera_timestamp_ns);
+            const double minimum = row.trigger_start_ms - previous->trigger_done_ms;
+            const double maximum = row.trigger_done_ms - previous->trigger_start_ms;
+            // Signed excess outside the trigger-call interval: negative below, positive above, zero inside.
+            const double deviation = spacing < minimum ? spacing - minimum :
+                                     (spacing > maximum ? spacing - maximum : 0);
             deviations.push_back(deviation);
             summary.spacing_dev_max_ms = std::max(summary.spacing_dev_max_ms, std::abs(deviation));
         }
@@ -190,6 +194,9 @@ inline FrameTimingSummary check_frame_timing(std::vector<FrameTiming>& rows, boo
             if (k + 1 < rows.size() && std::isfinite(exposure_us) && exposure_us > 0) {
                 row.next_dac_slack_ms = rows[k + 1].dac_start_ms -
                                         (row.exposure_start_host_ms + exposure_us / 1000.0);
+                if (std::isfinite(row.next_dac_slack_ms) && row.next_dac_slack_ms >= -clock.uncertainty_ms &&
+                    row.next_dac_slack_ms < clock.uncertainty_ms)
+                    summary.latch_uncertain = true;
                 if (!std::isfinite(summary.min_slack_ms) || row.next_dac_slack_ms < summary.min_slack_ms)
                     summary.min_slack_ms = row.next_dac_slack_ms;
                 if (row.next_dac_slack_ms < -clock.uncertainty_ms) {
@@ -214,7 +221,8 @@ inline FrameTimingSummary check_frame_timing(std::vector<FrameTiming>& rows, boo
     }
     summary.suspect = summary.suspect || summary.id_gaps || summary.timestamp_errors ||
                       summary.spacing_dev_max_ms > 0.5 || summary.overlap_violations ||
-                      summary.negative_slack_frames || summary.unsettled_frames || summary.timestamp_meaning_suspect;
+                      summary.negative_slack_frames || summary.unsettled_frames || summary.timestamp_meaning_suspect ||
+                      summary.latch_uncertain;
     return summary;
 }
 

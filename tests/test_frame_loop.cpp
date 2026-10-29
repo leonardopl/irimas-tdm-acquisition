@@ -323,25 +323,25 @@ void check_latch_quality()
     first.camera_ns = 1000000000ULL;
     last.camera_ns = 1100000000ULL;
     for (bool overlap : {false, true}) {
-        const double limit = overlap ? 0.25 : 0.5;
-        for (double uncertainty : {limit - 0.001, limit, limit + 0.001, 1.5}) {
+        for (double uncertainty : {0.249, 0.25, 0.251, 0.4, 0.499, 0.5, 0.501, 1.5}) {
             first.host_before_ms = -uncertainty;
             first.host_after_ms = uncertainty;
             last.host_before_ms = 100 - uncertainty;
             last.host_after_ms = 100 + uncertainty;
             const auto clock = frame_clock_mapping(first, last, true);
             auto rows = synthetic_rows();
-            rows.resize(1);
             const auto summary = check_frame_timing(rows, overlap, 5, 244, 500, clock);
-            const bool suspect = uncertainty > limit;
+            const bool suspect = uncertainty > 0.5;
             assert(summary.latch_uncertain == suspect && summary.suspect == suspect);
             const std::string line = frame_timing_summary_line(summary);
             assert((line.find("note=latch_uncertain") != std::string::npos) == suspect);
             const std::string json = summary_json(summary);
             assert(json.find(std::string("\"latch_uncertain\": ") + (suspect ? "true" : "false")) != std::string::npos);
             assert((json.find("latch checks are inconclusive") != std::string::npos) == suspect);
-            if (!overlap && uncertainty > 0.5)
+            if (uncertainty > 0.5) {
+                rows.resize(1); // The cap still applies when there is no next-DAC slack.
                 assert(check_frame_timing(rows, true, 5, 244, 2000, clock).latch_uncertain);
+            }
         }
     }
     auto rows = synthetic_rows();
@@ -364,6 +364,128 @@ void check_latch_quality()
         assert(frame_timing_summary_line(summary).find(" latch=" + status) != std::string::npos);
         assert(summary_json(summary).find("\"latch\": \"" + status + "\"") != std::string::npos);
         assert(std::isnan(rows[0].exposure_start_host_ms));
+    }
+}
+
+void check_slack_uncertainty()
+{
+    FrameClockMapping clock;
+    clock.valid = true;
+    clock.first.camera_ns = 1000000000ULL;
+    clock.uncertainty_ms = 0.4;
+    for (bool overlap : {false, true}) {
+        for (double slack : {0.0, 0.1, 0.399, 0.401}) {
+            auto rows = synthetic_rows();
+            rows[1].dac_start_ms = 6.25 + slack;
+            // Zero margin isolates latch quality from the loop's overlap rule.
+            const auto summary = check_frame_timing(rows, overlap, 5, 250, 0, clock);
+            assert(near(summary.min_slack_ms, slack));
+            assert(summary.latch_uncertain == (slack < clock.uncertainty_ms));
+            assert(summary.suspect == summary.latch_uncertain);
+            assert(!summary.negative_slack_frames && !summary.overlap_violations && !summary.unsettled_frames);
+        }
+        // Equality is conclusive (binary-exact values avoid rounding across the boundary).
+        auto rows = synthetic_rows();
+        clock.uncertainty_ms = 0.5;
+        rows[1].dac_start_ms = 6.75;
+        const auto summary = check_frame_timing(rows, overlap, 5, 250, 500, clock);
+        assert(near(summary.min_slack_ms, clock.uncertainty_ms));
+        assert(!summary.latch_uncertain && !summary.suspect);
+        rows[1].dac_start_ms = 5.75; // Exactly -u is inconclusive, not a proven violation.
+        const auto boundary = check_frame_timing(rows, false, 5, 250, 500, clock);
+        assert(near(boundary.min_slack_ms, -clock.uncertainty_ms));
+        assert(boundary.latch_uncertain && boundary.suspect && !boundary.negative_slack_frames);
+        clock.uncertainty_ms = 0.4;
+    }
+    const double invalid_exposures[] = {0, NAN, INFINITY};
+    for (double exposure : invalid_exposures) {
+        auto rows = synthetic_rows();
+        const auto summary = check_frame_timing(rows, false, 5, exposure, 500, clock);
+        assert(std::isnan(summary.min_slack_ms));
+        assert(!summary.latch_uncertain && !summary.suspect);
+    }
+}
+
+FrameClockLatch recorded_latch(std::uint64_t camera_ns, double before_ms, double after_ms)
+{
+    FrameClockLatch latch;
+    latch.valid = true;
+    latch.camera_ns = camera_ns;
+    latch.host_before_ms = before_ms;
+    latch.host_after_ms = after_ms;
+    return latch;
+}
+
+void check_real_timing_replays()
+{
+    // Unmodified schema-2 CSVs and latch windows from frame_timing_summary.json in:
+    // ~/Documents/acquisitions/20261029_094638/background/000_20261029_094812/acquis/
+    // ~/Documents/acquisitions/20261029_095359/background/000_20261029_100403_633nm/acquis/
+    // ~/Documents/acquisitions/20261029_095359/background/002_20261029_100423_488nm/acquis/
+    struct Replay {
+        const char* path;
+        int settle_ms;
+        double exposure_us;
+        FrameClockLatch first, last;
+    };
+    const Replay replays[] = {
+        {"tests/fixtures/frame_timing_20261029_094812.csv", 10, 380,
+         recorded_latch(1796563079453673ULL, 0.001046, 0.680537),
+         recorded_latch(1796568354389997ULL, 5274.974296, 5275.145752)},
+        {"tests/fixtures/frame_timing_20261029_100403_633nm.csv", 5, 326,
+         recorded_latch(1797514428185208ULL, 0.002628, 0.361268),
+         recorded_latch(1797520817183166ULL, 6389.011181, 6389.225117)},
+        {"tests/fixtures/frame_timing_20261029_100423_488nm.csv", 5, 4575,
+         recorded_latch(1797534852169995ULL, 0.004805, 0.195373),
+         recorded_latch(1797542750144007ULL, 7897.833191, 7898.049090)}
+    };
+    for (std::size_t i = 0; i < 3; ++i) {
+        const Replay& replay = replays[i];
+        std::ifstream input(replay.path);
+        assert(input.good());
+        std::string line;
+        std::getline(input, line); // Header; derived CSV columns are deliberately recomputed.
+        assert(line.find("schema_version,image_index,settle_ms,") == 0);
+        std::vector<FrameTiming> rows;
+        while (std::getline(input, line)) {
+            FrameTiming row;
+            int schema, settle;
+            unsigned long long frame_id, camera_ns, system_ns;
+            assert(std::sscanf(line.c_str(), "%d,%zu,%d,%lf,%lf,%lf,%lf,%lf,%lf,%llu,%llu,%llu",
+                               &schema, &row.image_index, &settle, &row.dac_start_ms, &row.dac_done_ms,
+                               &row.trigger_start_ms, &row.trigger_done_ms, &row.buffer_ms, &row.written_ms,
+                               &frame_id, &camera_ns, &system_ns) == 12);
+            assert(schema == 2 && settle == replay.settle_ms);
+            row.frame_id = frame_id;
+            row.camera_timestamp_ns = camera_ns;
+            row.system_timestamp_ns = system_ns;
+            rows.push_back(row);
+        }
+        assert(input.eof() && rows.size() == 400);
+        const auto clock = frame_clock_mapping(replay.first, replay.last, true);
+        assert(clock.valid);
+        const auto summary = check_frame_timing(rows, true, replay.settle_ms, replay.exposure_us, 500, clock);
+        assert(!summary.suspect && !summary.latch_uncertain && summary.frames == 400);
+        assert(near(summary.spacing_dev_max_ms, 0) && summary.min_slack_ms > clock.uncertainty_ms);
+        double old_spacing_max_ms = 0;
+        double start_spacing_max_ms = 0;
+        for (std::size_t k = 1; k < rows.size(); ++k) {
+            const double deviation = camera_delta_ms(rows[k].camera_timestamp_ns, rows[k - 1].camera_timestamp_ns) -
+                                     (rows[k].trigger_done_ms - rows[k - 1].trigger_done_ms);
+            old_spacing_max_ms = std::max(old_spacing_max_ms, std::abs(deviation));
+            const double start_deviation = camera_delta_ms(rows[k].camera_timestamp_ns, rows[k - 1].camera_timestamp_ns) -
+                                           (rows[k].trigger_start_ms - rows[k - 1].trigger_start_ms);
+            start_spacing_max_ms = std::max(start_spacing_max_ms, std::abs(start_deviation));
+        }
+        if (i == 0) {
+            assert(clock.uncertainty_ms > 0.25 && clock.uncertainty_ms < 0.5);
+            assert(old_spacing_max_ms < 0.5); // Previously suspect solely from the overlap latch rule.
+        } else if (i == 1) {
+            assert(clock.uncertainty_ms < 0.25);
+            assert(old_spacing_max_ms > 17); // Previously suspect solely from delayed trigger returns.
+        } else {
+            assert(start_spacing_max_ms > 2.7); // Exposure moved inside a long trigger call.
+        }
     }
 }
 
@@ -395,13 +517,29 @@ void check_timing()
     assert(near(summary.trigger_done_delay.median_ms, 0) && near(summary.trigger_done_delay.min_ms, 0) &&
            near(summary.trigger_done_delay.max_ms, 0) && !summary.timestamp_meaning_suspect);
 
+    rows[1].trigger_done_ms += 17;
+    summary = check_frame_timing(rows, false, 5, 244, 500, clock);
+    assert(!summary.suspect && near(summary.spacing_dev_max_ms, 0));
+    // Exposure can move inside a long trigger call without a clock mapping.
+    rows = synthetic_rows();
+    rows[1].camera_timestamp_ns += 2700000;
+    rows[1].trigger_done_ms += 4.75;
+    summary = check_frame_timing(rows, false, 5, 244, 500);
+    assert(!summary.suspect && near(summary.spacing_dev_max_ms, 0));
+    // Camera spacing outside the trigger-call intervals still warns.
+    rows = synthetic_rows();
+    rows[1].camera_timestamp_ns += 800000;
+    summary = check_frame_timing(rows, false, 5, 244, 500);
+    assert(summary.suspect && near(summary.spacing_dev_max_ms, 0.6));
+
+    rows = synthetic_rows();
     rows[1].frame_id += 1; // skipped id, followed by a duplicate
     summary = check_frame_timing(rows, true, 5, 244, 500, clock);
     assert(summary.suspect && summary.id_gaps == 2 && summary.id_gap_after_images[0] == 0);
     rows = synthetic_rows();
     rows[1].camera_timestamp_ns += 2000000;
     summary = check_frame_timing(rows, false, 5, 244, 500);
-    assert(summary.suspect && near(summary.spacing_dev_max_ms, 2) && near(summary.spacing_dev_median_ms, 0));
+    assert(summary.suspect && near(summary.spacing_dev_max_ms, 1.8) && near(summary.spacing_dev_median_ms, 0));
     assert(std::isnan(summary.min_slack_ms) && std::isnan(rows[0].exposure_start_host_ms));
     assert(std::isnan(summary.trigger_start_delay.median_ms) && std::isnan(summary.trigger_done_delay.min_ms));
     rows[2].camera_timestamp_ns = rows[1].camera_timestamp_ns;
@@ -410,8 +548,8 @@ void check_timing()
     rows[1].camera_timestamp_ns = rows[0].camera_timestamp_ns - 1000000ULL;
     rows[2].camera_timestamp_ns = rows[1].camera_timestamp_ns + 20000000ULL;
     summary = check_frame_timing(rows, false, 5, 244, 500);
-    assert(summary.timestamp_errors == 1 && near(summary.spacing_dev_max_ms, 21));
-    assert(near(summary.spacing_dev_median_ms, -10.5));
+    assert(summary.timestamp_errors == 1 && near(summary.spacing_dev_max_ms, 20.8));
+    assert(near(summary.spacing_dev_median_ms, -10.4));
 
     rows = synthetic_rows();
     rows[1].dac_start_ms = 6.2;
@@ -424,7 +562,7 @@ void check_timing()
     summary = check_frame_timing(rows, true, 5, 244, 500, clock);
     assert(summary.suspect && summary.unsettled_frames == 1);
     assert(summary.unsettled_images == std::vector<std::size_t>{0});
-    // Keep raw slack, but only flag violations outside the latch's 0.2 ms uncertainty.
+    // Slack within uncertainty is inconclusive; a proven negative slack stays a violation.
     for (double deficit : {0.199, 0.201}) {
         rows = synthetic_rows();
         rows[0].dac_done_ms = 1 + deficit;
@@ -436,7 +574,9 @@ void check_timing()
         summary = check_frame_timing(rows, false, 5, 244, 500, clock);
         assert(near(summary.min_slack_ms, -deficit));
         assert(summary.negative_slack_frames == (deficit > 0.2 ? 1U : 0U));
-        assert(summary.suspect == (deficit > 0.2));
+        assert(summary.latch_uncertain == (deficit <= 0.2) && summary.suspect);
+        assert((frame_timing_summary_line(summary).find("note=latch_uncertain") != std::string::npos) ==
+               (deficit <= 0.2));
     }
     rows = synthetic_rows();
     const double start_delays[] = {0.1, 0.4, 0.2};
@@ -554,6 +694,8 @@ int main()
     check_invalid_overlap_exposure();
     check_summary_context();
     check_latch_quality();
+    check_slack_uncertainty();
+    check_real_timing_replays();
     for (bool overlap : {false, true}) {
         check_success(overlap, 0);
         check_success(overlap, 1);
