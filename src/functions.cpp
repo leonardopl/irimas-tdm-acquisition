@@ -97,79 +97,65 @@ int clear_acquisition(string  rep, string chemin_config_manip,string chemin_reco
     return 0;
 }
 
-// Extract a string value for the given key from a config file
-string extract_string(std::string token,  std::string file_path)
+namespace {
+
+bool config_line_value(const string& line, const string& token, string& value)
+{
+    const size_t first = line.find_first_not_of(" \t\r");
+    if (first == string::npos || line[first] == '#')
+        return false;
+
+    const size_t separator = line.find(' ');
+    if (separator == string::npos || line.substr(0, separator) != token)
+        return false;
+
+    string candidate = line.substr(separator + 1);
+    const size_t comment = candidate.find('#');
+    if (comment != string::npos)
+        candidate.erase(comment);
+    const size_t begin = candidate.find_first_not_of(" \t\r");
+    if (begin == string::npos)
+        return false;
+
+    // Preserve uncommented values byte for byte, including internal spaces.
+    if (comment != string::npos)
+        candidate = candidate.substr(begin, candidate.find_last_not_of(" \t\r") - begin + 1);
+    value = candidate;
+    return true;
+}
+
+string read_config_value(const string& token, const string& file_path)
 {
     ifstream file(file_path.c_str(), ios::in);
-    string line, keyword, value_str, separator=" ";
-    string value;
-    vector<std::string> tokens;
+    if (!file) {
+        cerr << "Cannot open file: " << file_path << endl;
+        return "";
+    }
 
-    if(file)
-    {
-        while(!file.eof()){
-            getline(file,line,'\n');
-            if(line[0]!='#') // skip comment lines
-            tokens.push_back(line);
+    string line, candidate, value;
+    while (getline(file, line)) {
+        if (config_line_value(line, token, candidate)) {
+            cout << token << "=" << candidate << endl;
+            value = candidate;
         }
     }
-    else
-        cerr << "Cannot open file: "<< file_path<< endl;
-
-    int num_tokens=tokens.size();
-    for(int i=0;i<num_tokens;i++){
-        line=tokens[i];
-        if(line!=""){
-            int sep_pos=line.find(separator);
-            int sep_len=separator.length();
-            keyword = line.substr(0, sep_pos);
-            if(keyword==token){
-            value_str=line.substr(sep_pos+sep_len,line.size()-(keyword.size()+sep_len));
-            cout<<keyword<<"="<<value_str<<endl;
-            value=value_str.c_str();
-            }
-        }
-    }
-    if(value.empty())
-        cout<<"Key "<<token<<" not found in file "<<file_path<<endl;
-    file.close();
     return value;
 }
 
-float extract_val(string token,  string file_path)
+} // namespace
+
+// Extract a string value for the given key from a config file
+string extract_string(std::string token, std::string file_path)
 {
-    ifstream file(file_path.c_str(), ios::in);
-    string line, keyword, value_str, separator=" ";
-    float value=0;
-    vector<std::string> tokens;
-
-    if(file)
-    {
-        while(!file.eof()){
-            getline(file,line,'\n');
-            if(line[0]!='#') // skip comment lines
-            tokens.push_back(line);
-        }
-    }
-    else
-        cerr << "Cannot open file: "<< file_path<< endl;
-
-    int num_tokens=tokens.size();
-    for(int i=0;i<num_tokens;i++){
-        line=tokens[i];
-        if(line!=""){
-            int sep_pos=line.find(separator);
-            int sep_len=separator.length();
-            keyword = line.substr(0, sep_pos);
-            if(keyword==token){
-            value_str=line.substr(sep_pos+sep_len,line.size()-(keyword.size()+sep_len));
-            cout<<keyword<<"="<<value_str<<endl;
-            value=atof(value_str.c_str());
-            }
-        }
-    }
-    file.close();
+    const string value = read_config_value(token, file_path);
+    if (value.empty())
+        cout << "Key " << token << " not found in file " << file_path << endl;
     return value;
+}
+
+float extract_val(string token, string file_path)
+{
+    return atof(read_config_value(token, file_path).c_str());
 }
 
 

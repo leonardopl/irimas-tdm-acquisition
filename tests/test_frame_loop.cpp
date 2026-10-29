@@ -202,7 +202,7 @@ void check_config()
     assert(config.requested_overlap);
     assert(parse_frame_loop_options("0", "100000", config, error) && !config.overlap && config.margin_us == 100000);
     assert(!config.requested_overlap);
-    // An inline comment after the value (as get_string returns it from the config line) is ignored.
+    // An inline comment after the value (a command-line value is passed as given) is ignored.
     assert(parse_frame_loop_options("1               # B192 test", "250 # us", config, error));
     assert(config.overlap && config.margin_us == 250);
     const char* invalid_modes[] = {"2", "-1", "0.5", "true", "1x", "999999999999999999999999", " "};

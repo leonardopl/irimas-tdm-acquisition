@@ -63,6 +63,10 @@ are read from `processing.conf`, falling back to `recon.txt`. If both names for
 either role exist, the program stops with an error naming both files. It prints
 the selected path for each role and never searches `legacy_schema1/` backups.
 If neither name exists, the existing missing-file diagnostics and defaults apply.
+An inline `#` comment after a config value is ignored, and a key with no value (a bare key or blanks only) counts as
+absent, as in the GUI's numeric reads. The GUI still keeps a comment in its text values, so give a text key
+(`SCAN_PATTERN`, `PIXEL_FORMAT`, ...) its comment on the line above. A path is cut at a `#`: never use one in
+`CHEMIN_ACQUIS`, the folder whose files the program clears before a scan.
 
 The key-value reader ignores unused keys such as `CONFIG_SCHEMA`, `MODALITY`, and
 `QWLSI_MASK_*`; an absent `CONFIG_SCHEMA` remains compatible with schema 1.

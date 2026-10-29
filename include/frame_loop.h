@@ -38,7 +38,8 @@ inline bool parse_frame_loop_options(const std::string& overlap, const std::stri
     options.fallback_reason.clear();
     options.margin_us = 500;
     error.clear();
-    // get_string returns the rest of the config line: drop an inline "# comment" as the numeric keys' atoi does.
+    // get_string already drops an inline "# comment" from config lines; a command-line value is passed as given, so
+    // drop one here too.
     const std::string values[] = {overlap.substr(0, overlap.find('#')), margin.substr(0, margin.find('#'))};
     const char* messages[] = {"FSM_OVERLAP must be 0 or 1",
                              "FSM_OVERLAP_MARGIN_US must be between 0 and 100000"};
