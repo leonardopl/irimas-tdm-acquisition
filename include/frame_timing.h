@@ -7,12 +7,20 @@
 #include <cstring>
 #include <cerrno>
 #include <cmath>
+#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <locale>
 #include <sstream>
 #include <string>
 #include <vector>
+
+// The version of check_frame_timing's verdict rules, written into frame_timing_summary.json as "rules_version" (a summary
+// without the key counts as 1). 1: before a6e7f77 (the overlap latch rule and the trigger-done spacing made good scans
+// suspect); 2: a6e7f77's latch and spacing rules, and B206's dac_* keys (they do not change the verdict of a scan
+// without DAC failures). Bump it whenever check_frame_timing's verdict rules change: readers re-check older summaries from
+// frame_timing.csv (recheck_frame_timing). This header is copied byte-identical into the qwlsi-gui repository.
+constexpr int frame_timing_rules_version = 2;
 
 struct FrameTiming {
     std::size_t image_index = 0;
@@ -319,7 +327,8 @@ inline bool write_frame_timing_summary(const std::string& path, const FrameTimin
         return false;
     }
     std::ostringstream text;
-    text << "{\n  \"mode\": \"" << (summary.overlap ? "overlap" : "sequential") << "\",\n"
+    text << "{\n  \"rules_version\": " << frame_timing_rules_version
+         << ",\n  \"mode\": \"" << (summary.overlap ? "overlap" : "sequential") << "\",\n"
          << "  \"requested_mode\": \"" << (summary.requested_overlap ? "overlap" : "sequential") << "\",\n"
          << "  \"fallback_reason\": " << (summary.fallback_reason.empty() ? "null" : frame_timing_json_string(summary.fallback_reason))
          << ",\n  \"settle_ms\": " << summary.settle_ms
@@ -389,4 +398,120 @@ inline bool write_frame_timing_csv(const std::string& path, const std::vector<Fr
         return false;
     }
     return true;
+}
+
+// One frame_timing.csv field as a number, in the C locale; the whole field must be the number.
+inline bool frame_timing_field(std::istringstream& input, const std::string& text, double& value)
+{
+    char rest;
+    input.clear();
+    input.str(text);
+    return !text.empty() && (input >> value) && !(input >> rest);
+}
+
+inline bool frame_timing_field(std::istringstream& input, const std::string& text, unsigned long long& value)
+{
+    char rest;
+    input.clear();
+    input.str(text);
+    return !text.empty() && text[0] >= '0' && text[0] <= '9' && (input >> value) && !(input >> rest);
+}
+
+// frame_timing.csv (schema 2) as write_frame_timing_csv writes it: one row per commanded frame, image_index 0, 1, ...
+// in order; the derived columns (exposure_start_host_ms, next_dac_slack_ms) as written, NaN when empty; settle_ms is the
+// file's settle column (the same value in every row). dac_retried / dac_failed are not in the file and stay false. False
+// with the reason for a file that cannot be read, another header (schema 1 has no derived columns) or a malformed row.
+inline bool read_frame_timing_csv(const std::string& path, std::vector<FrameTiming>& rows, int& settle_ms,
+                                  std::string& error)
+{
+    static const char* const header = "schema_version,image_index,settle_ms,dac_start_ms,dac_done_ms,trigger_start_ms,"
+                                      "trigger_done_ms,buffer_ms,written_ms,frame_id,camera_timestamp_ns,"
+                                      "system_timestamp_ns,exposure_start_host_ms,next_dac_slack_ms";
+    rows.clear();
+    settle_ms = 0;
+    std::ifstream file(path.c_str(), std::ios::binary);
+    if (!file) {
+        error = path + ": " + std::strerror(errno);
+        return false;
+    }
+    std::istringstream number;
+    number.imbue(std::locale::classic());
+    std::string line;
+    if (!std::getline(file, line)) {
+        error = path + ": empty file";
+        return false;
+    }
+    if (!line.empty() && line[line.size() - 1] == '\r')
+        line.erase(line.size() - 1);
+    if (line != header) {
+        error = path + ": not a schema 2 frame timing header";
+        return false;
+    }
+    for (std::size_t row = 2; std::getline(file, line); ++row) {
+        if (!line.empty() && line[line.size() - 1] == '\r')
+            line.erase(line.size() - 1);
+        std::vector<std::string> fields;
+        for (std::size_t from = 0;;) {
+            const std::size_t comma = line.find(',', from);
+            fields.push_back(line.substr(from, comma == std::string::npos ? std::string::npos : comma - from));
+            if (comma == std::string::npos)
+                break;
+            from = comma + 1;
+        }
+        FrameTiming timing;
+        double values[6];
+        unsigned long long index = 0, settle = 0, ids[3];
+        bool ok = fields.size() == 14 && fields[0] == "2" && frame_timing_field(number, fields[1], index) &&
+                  index == rows.size() && frame_timing_field(number, fields[2], settle) && settle <= 1000000;
+        for (int k = 0; ok && k < 6; ++k)
+            ok = frame_timing_field(number, fields[3 + k], values[k]) && std::isfinite(values[k]);
+        for (int k = 0; ok && k < 3; ++k)
+            ok = frame_timing_field(number, fields[9 + k], ids[k]);
+        double derived[2] = {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN()};
+        for (int k = 0; ok && k < 2; ++k)
+            ok = fields[12 + k].empty() || (frame_timing_field(number, fields[12 + k], derived[k]) &&
+                                            std::isfinite(derived[k]));
+        if (ok && !rows.empty() && static_cast<int>(settle) != settle_ms)
+            ok = false;
+        if (!ok) {
+            std::ostringstream reason;
+            reason << path << ": malformed row " << row;
+            error = reason.str();
+            rows.clear();
+            settle_ms = 0;
+            return false;
+        }
+        settle_ms = static_cast<int>(settle);
+        timing.image_index = static_cast<std::size_t>(index);
+        timing.dac_start_ms = values[0];
+        timing.dac_done_ms = values[1];
+        timing.trigger_start_ms = values[2];
+        timing.trigger_done_ms = values[3];
+        timing.buffer_ms = values[4];
+        timing.written_ms = values[5];
+        timing.frame_id = ids[0];
+        timing.camera_timestamp_ns = ids[1];
+        timing.system_timestamp_ns = ids[2];
+        timing.exposure_start_host_ms = derived[0];
+        timing.next_dac_slack_ms = derived[1];
+        rows.push_back(timing);
+    }
+    if (file.bad()) {
+        error = path + ": read failed";
+        rows.clear();
+        return false;
+    }
+    return true;
+}
+
+// A recorded scan's verdict under the current rules: its frame_timing.csv rows (read_frame_timing_csv; the derived
+// columns are recomputed), the mode, settle, exposure and margin of its summary, and the camera/host latch windows it
+// recorded (latch_before / latch_after). The clock is rebuilt as the program builds it for a camera with the latch nodes.
+// The CSV cannot say whether a DAC write failed: the caller keeps the summary's dac_* keys.
+inline FrameTimingSummary recheck_frame_timing(std::vector<FrameTiming>& rows, bool overlap, int settle_ms,
+                                               double exposure_us, int margin_us, const FrameClockLatch& first,
+                                               const FrameClockLatch& last)
+{
+    return check_frame_timing(rows, overlap, settle_ms, exposure_us, margin_us,
+                              frame_clock_mapping(first, last, true));
 }

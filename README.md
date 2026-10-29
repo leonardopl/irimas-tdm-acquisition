@@ -216,6 +216,16 @@ command against trigger return plus exposure plus margin. The summary on stdout 
 `frame_timing_summary.json` contains the same fields, plus the median deviation,
 violation counts, affected image indices, clock offset, drift in ppm, latch
 uncertainty in ms and both raw camera/host latch windows.
+Its first key, `rules_version`, is the version of the verdict rules that wrote it
+(`frame_timing_rules_version` in `include/frame_timing.h`; 2 since 29 Oct 2026: the
+latch and spacing rules of that day and the `dac_*` keys). Summaries without it were
+written under version 1 (before those rules), and a reader can re-check them:
+`read_frame_timing_csv` reads `frame_timing.csv` back and `recheck_frame_timing`
+runs today's check on its rows with the summary's settings and latch windows (the
+GUI shows that verdict and never rewrites the file). Bump
+`frame_timing_rules_version` whenever `check_frame_timing`'s verdict rules change;
+the header is copied byte-identical into the GUI repository (its
+`tools/check_frame_timing_sync.sh` compares them).
 The JSON also records `requested_mode` (from `FSM_OVERLAP`), `mode` (actually run),
 `fallback_reason` (`null` without a fallback), `settle_ms`, `exposure_us` (`null`
 when unavailable or unreliable), and `margin_us`. A local invalid-exposure check

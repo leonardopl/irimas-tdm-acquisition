@@ -608,30 +608,17 @@ void check_real_timing_replays()
     };
     for (std::size_t i = 0; i < 3; ++i) {
         const Replay& replay = replays[i];
-        std::ifstream input(replay.path);
-        assert(input.good());
-        std::string line;
-        std::getline(input, line); // Header; derived CSV columns are deliberately recomputed.
-        assert(line.find("schema_version,image_index,settle_ms,") == 0);
         std::vector<FrameTiming> rows;
-        while (std::getline(input, line)) {
-            FrameTiming row;
-            int schema, settle;
-            unsigned long long frame_id, camera_ns, system_ns;
-            assert(std::sscanf(line.c_str(), "%d,%zu,%d,%lf,%lf,%lf,%lf,%lf,%lf,%llu,%llu,%llu",
-                               &schema, &row.image_index, &settle, &row.dac_start_ms, &row.dac_done_ms,
-                               &row.trigger_start_ms, &row.trigger_done_ms, &row.buffer_ms, &row.written_ms,
-                               &frame_id, &camera_ns, &system_ns) == 12);
-            assert(schema == 2 && settle == replay.settle_ms);
-            row.frame_id = frame_id;
-            row.camera_timestamp_ns = camera_ns;
-            row.system_timestamp_ns = system_ns;
-            rows.push_back(row);
-        }
-        assert(input.eof() && rows.size() == 400);
-        const auto clock = frame_clock_mapping(replay.first, replay.last, true);
+        int settle = -1;
+        std::string error;
+        assert(read_frame_timing_csv(replay.path, rows, settle, error) && error.empty());
+        assert(settle == replay.settle_ms && rows.size() == 400 && rows[399].image_index == 399);
+        // The derived columns as the program wrote them (the recheck recomputes them).
+        assert(std::isfinite(rows[0].exposure_start_host_ms) && std::isfinite(rows[0].next_dac_slack_ms));
+        assert(std::isnan(rows[399].next_dac_slack_ms));
+        const auto summary = recheck_frame_timing(rows, true, settle, replay.exposure_us, 500, replay.first, replay.last);
+        const FrameClockMapping& clock = summary.clock;
         assert(clock.valid);
-        const auto summary = check_frame_timing(rows, true, replay.settle_ms, replay.exposure_us, 500, clock);
         assert(!summary.suspect && !summary.latch_uncertain && summary.frames == 400);
         assert(near(summary.spacing_dev_max_ms, 0) && summary.min_slack_ms > clock.uncertainty_ms);
         double old_spacing_max_ms = 0;
@@ -654,6 +641,77 @@ void check_real_timing_replays()
             assert(start_spacing_max_ms > 2.7); // Exposure moved inside a long trigger call.
         }
     }
+}
+
+// write_frame_timing_csv -> read_frame_timing_csv gives the rows back (times to the 3 decimals written, derived columns
+// to 6, empty ones NaN) and the settle; any other file is refused with its reason.
+void check_csv_round_trip(const std::string& path, const std::vector<FrameTiming>& written)
+{
+    std::vector<FrameTiming> rows;
+    int settle = -1;
+    std::string error;
+    assert(read_frame_timing_csv(path, rows, settle, error) && error.empty());
+    assert(settle == 5 && rows.size() == written.size());
+    for (std::size_t k = 0; k < rows.size(); ++k) {
+        const FrameTiming& a = rows[k];
+        const FrameTiming& b = written[k];
+        assert(a.image_index == b.image_index && a.frame_id == b.frame_id);
+        assert(a.camera_timestamp_ns == b.camera_timestamp_ns && a.system_timestamp_ns == b.system_timestamp_ns);
+        const double times[][2] = {{a.dac_start_ms, b.dac_start_ms}, {a.dac_done_ms, b.dac_done_ms},
+                                   {a.trigger_start_ms, b.trigger_start_ms}, {a.trigger_done_ms, b.trigger_done_ms},
+                                   {a.buffer_ms, b.buffer_ms}, {a.written_ms, b.written_ms}};
+        for (const auto& pair : times)
+            assert(std::abs(pair[0] - pair[1]) <= 0.0005);
+        for (const auto& pair : {std::make_pair(a.exposure_start_host_ms, b.exposure_start_host_ms),
+                                 std::make_pair(a.next_dac_slack_ms, b.next_dac_slack_ms)})
+            assert(std::isnan(pair.first) == std::isnan(pair.second) &&
+                   (std::isnan(pair.first) || std::abs(pair.first - pair.second) <= 5e-7));
+        assert(!a.dac_retried && !a.dac_failed);
+    }
+    // A camera that lost frame 1: buffer and written -1, no exposure columns.
+    std::vector<FrameTiming> lost = written;
+    lost[1].buffer_ms = lost[1].written_ms = -1;
+    lost[1].exposure_start_host_ms = lost[1].next_dac_slack_ms = NAN;
+    assert(write_frame_timing_csv(path, lost, 5, error));
+    assert(read_frame_timing_csv(path, rows, settle, error) && rows.size() == lost.size());
+    assert(near(rows[1].buffer_ms, -1) && near(rows[1].written_ms, -1) && std::isnan(rows[1].exposure_start_host_ms));
+    // CRLF line ends read the same.
+    std::ifstream input(path.c_str());
+    std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    std::string crlf;
+    for (char c : text) crlf += c == '\n' ? std::string("\r\n") : std::string(1, c);
+    const std::string header = text.substr(0, text.find('\n') + 1);
+    const std::string row0 = text.substr(header.size(), text.find('\n', header.size()) + 1 - header.size());
+    auto refused = [&](const std::string& content, const char* reason) {
+        std::ofstream(path.c_str(), std::ios::binary) << content;
+        std::vector<FrameTiming> out(1);
+        int out_settle = -1;
+        std::string out_error;
+        const bool read = read_frame_timing_csv(path, out, out_settle, out_error);
+        assert(!read && out.empty() && out_settle == 0 && contains(out_error, reason));
+        (void)read;
+    };
+    std::ofstream(path.c_str(), std::ios::binary) << crlf;
+    assert(read_frame_timing_csv(path, rows, settle, error) && rows.size() == lost.size() && settle == 5);
+    // Header only: no rows, no error.
+    std::ofstream(path.c_str(), std::ios::binary) << header;
+    assert(read_frame_timing_csv(path, rows, settle, error) && rows.empty());
+    auto replace = [](std::string value, const std::string& from, const std::string& to) {
+        value.replace(value.find(from), from.size(), to);
+        return value;
+    };
+    refused("", "empty file");
+    refused("image_index,settle_ms,dac_start_ms\n0,5,0.5\n", "not a schema 2");   // schema 1
+    refused(header + replace(row0, "2,0,5,", "1,0,5,"), "malformed row 2");          // another schema in a row
+    refused(header + replace(row0, "2,0,5,", "2,1,5,"), "malformed row 2");          // not image 0
+    refused(header + row0 + row0, "malformed row 3");                                // image 0 twice
+    refused(header + replace(row0, "2,0,5,", "2,0,7,") + text.substr(header.size() + row0.size()),
+            "malformed row 3");                                                      // the settle changes
+    refused(header + replace(row0, "2,0,5,0.000", "2,0,5,abc"), "malformed row 2");  // a number that is not one
+    refused(header + row0.substr(0, 20) + "\n", "malformed row 2");                  // a short row
+    refused(header + replace(row0, ",100,", ",-100,"), "malformed row 2");            // a negative frame id
+    std::remove(path.c_str());
+    assert(!read_frame_timing_csv(path, rows, settle, error) && rows.empty() && contains(error, "No such file"));
 }
 
 void check_timing()
@@ -816,6 +874,7 @@ void check_timing()
     assert(json.find("\"trigger_done_delay_max_ms\": 0.000000") != std::string::npos);
     assert(json.find("\"latch_uncertainty_ms\": 0.200000") != std::string::npos);
     assert(json.find("\"timestamp_meaning_suspect\": false") != std::string::npos);
+    assert(json.find("{\n  \"rules_version\": 2,\n  \"mode\": \"overlap\",\n") == 0 && frame_timing_rules_version == 2);
     std::remove(path.c_str());
     summary = check_frame_timing(rows, false, 5, 244, 500);
     assert(write_frame_timing_summary(path, summary, error));
@@ -840,6 +899,7 @@ void check_timing()
     std::getline(csv, line);
     std::getline(csv, line);
     assert(line.substr(line.size() - 11) == ",46.000000,");
+    check_csv_round_trip(csv_path, rows);
     std::remove(csv_path.c_str());
     rows.resize(1);
     rows[0].camera_timestamp_ns += 2000000ULL;
