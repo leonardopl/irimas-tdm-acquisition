@@ -33,5 +33,16 @@ float write_val(string token, float token_value, string file_path);
 string extract_string(string token,  string file_path);
 float get_val(const string& key, const string& file_path, const map<string, string>& overrides);
 string get_string(const string& key, const string& file_path, const map<string, string>& overrides);
+// get_val in double precision: false when the key has no value (value untouched); a value that is not entirely a
+// finite number reads as NaN.
+bool get_double(const string& key, const string& file_path, const map<string, string>& overrides, double& value);
+// The run's NXMAX: --NXMAX or the config's NXMAX as before; when neither is set (CONFIG_SCHEMA 3 has no NXMAX, B211),
+// derived as the GUI does: round(crop NA / LAMBDA x TPCAM / Gt x DIM_ROI) clamped to [1, DIM_ROI / 2], crop NA =
+// CROP_NA (absent: NA), Gt = (F_TUBE / F_OBJ) / RF. Prints the derivation; false with error when an input is missing
+// or not positive.
+bool resolve_nxmax(const string& file_path, const map<string, string>& overrides, int& nxmax, string& error);
+// The file AMPLI_REF is read from: the acquisition config when it is CONFIG_SCHEMA 3 (AMPLI_REF lives only there),
+// else the processing config as before (schemas 1 and 2 carry it in both files).
+string ampli_ref_config_path(const string& acquisition_path, const string& processing_path);
 int clear_acquisition(string  rep, string chemin_config_manip,string chemin_recon);
 #endif

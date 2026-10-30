@@ -150,7 +150,14 @@ int main(int argc, char *argv[])
     int bytes_per_pixel = (pixel_format_str == "Mono8") ? 1 : 2;
     int cv_type = (pixel_format_str == "Mono8") ? CV_8UC1 : CV_16UC1;
 
-    int NXMAX = get_val("NXMAX", manip_config_path, args);
+    // CONFIG_SCHEMA 3 has no NXMAX setting: derived from the optics, refused before anything moves when it cannot be.
+    int NXMAX = 0;
+    string nxmax_error;
+    if (!resolve_nxmax(manip_config_path, args, NXMAX, nxmax_error))
+    {
+        cerr << nxmax_error << "; nothing moved" << endl;
+        return 1;
+    }
 
     // B199: an FSM schedule (the settle probe) replaces the scan pattern and NB_HOLO. The whole file is read and checked
     // here, before the acquis folder is cleared and before anything moves; a refused schedule stops the run.
@@ -212,7 +219,7 @@ int main(int argc, char *argv[])
 
     VfOffset.x = (get_val("VXMIN", manip_config_path, args) * NAcondLim + tiptilt_factor_x * 10);
     VfOffset.y = (get_val("VYMIN", manip_config_path, args) * NAcondLim + tiptilt_factor_y * 10);
-    b_AmpliRef = get_val("AMPLI_REF", recon_path, args);
+    b_AmpliRef = get_val("AMPLI_REF", ampli_ref_config_path(manip_config_path, recon_path), args);
 
     cout << "  ####################################" << endl;
     cout << "  #  voltage MAX x=" << tiptilt_factor_x*10 << "                   #" << endl;

@@ -1,5 +1,7 @@
 #include "functions.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cerrno>
 #include <sys/stat.h>
@@ -118,6 +120,11 @@ void check_inline_comments(const string& dir)
                  "RAW_SPACES  value with  spaces \t\n"
                  "CHEMIN_CONFIG /tmp/config#suffix\n"
                  "TAB_SEPARATOR\t99\n"
+                 "ALIGNED_PATTERN      FERMAT\n"
+                 "TRAILING_BLANKS Mono16  \t \r\n"
+                 "  INDENTED\t\t12.5\n"
+                 "EQUALS=7\nEQUALS_SPACED= 8\n"
+                 "HASH_KEY#9\n"
                  "BARE 5\nBARE\n"
                  "LAST_VALUE 99 # no final newline");
 
@@ -136,10 +143,21 @@ void check_inline_comments(const string& dir)
         {"REPEATED", "8", 8},
         {"EMPTY_ONLY", "", 0},
         {"UNCOMMENTED", "17", 17},
+        // Values are trimmed whether or not a comment follows; internal blanks stay.
         {"INTERNAL_SPACES", "/tmp/acquisition with  spaces", 0},
-        {"RAW_SPACES", " value with  spaces \t", 0},
+        {"RAW_SPACES", "value with  spaces", 0},
         {"CHEMIN_CONFIG", "/tmp/config", 0},
-        {"TAB_SEPARATOR", "", 0},
+        // Keys are separated by spaces or tabs, after any leading blanks (aligned columns).
+        {"TAB_SEPARATOR", "99", 99},
+        {"ALIGNED_PATTERN", "FERMAT", 0},
+        {"TRAILING_BLANKS", "Mono16", 0},
+        {"INDENTED", "12.5", 12.5f},
+        // '=' is not a separator (CONFIG_SCHEMA 3 forbids it): no value for EQUALS or EQUALS_SPACED.
+        {"EQUALS", "", 0},
+        {"EQUALS_SPACED", "", 0},
+        {"EQUALS=7", "", 0},
+        // A '#' ends the line, key included.
+        {"HASH_KEY", "", 0},
         {"LAST_VALUE", "99", 99},
         {"MISSING", "", 0},
         // A bare key or a blank value is no value (as in the GUI's loader): the earlier value stays.
@@ -174,6 +192,163 @@ void check_inline_comments(const string& dir)
     assert(std::remove(path.c_str()) == 0);
 }
 
+// The GUI's qwlsi_geometry::pupilRadiusBins with manip's Gt (TPCAM / ((F_TUBE / F_OBJ) / RF)), written out here so
+// that the derived NXMAX is checked against the GUI's formula, not against itself.
+int gui_pupil_radius_bins(double na, double lambda, double tpcam, double rf, double f_obj, double f_tube, int n)
+{
+    const double pitch = tpcam / ((f_tube / f_obj) / rf);
+    return std::max(1, std::min((int)std::round(na / lambda * pitch * n), n / 2));
+}
+
+// Returns resolve_nxmax's result; nxmax is -1 and error set on failure; printed collects stdout.
+int resolve_quietly(const string& path, const map<string, string>& overrides, string& error, string& printed)
+{
+    ostringstream messages;
+    streambuf* old_out = cout.rdbuf(messages.rdbuf());
+    int nxmax = -1;
+    const bool resolved = resolve_nxmax(path, overrides, nxmax, error);
+    cout.rdbuf(old_out);
+    printed = messages.str();
+    assert(resolved == error.empty());
+    return resolved ? nxmax : -1;
+}
+
+int resolve_quietly(const string& path, const map<string, string>& overrides = map<string, string>())
+{
+    string error, printed;
+    const int nxmax = resolve_quietly(path, overrides, error, printed);
+    assert(nxmax > 0);
+    return nxmax;
+}
+
+void check_derived_nxmax(const string& dir)
+{
+    const string path = dir + "/acquisition.conf";
+    // The live optics (CONFIG_SCHEMA 3: no NXMAX), aligned and commented as a hand edit may be.
+    const string optics =
+        "CONFIG_SCHEMA 3\nMODALITY QWLSI\n"
+        "NA      1.3        # objective\n"
+        "TPCAM\t3.45e-6\nRF 0.5\nF_OBJ 0.0018\nF_TUBE 0.18\n";
+    const string lambda = "LAMBDA 6.330000e-07\n", dim = "DIM_ROI 2048\n";
+    write_config(path, optics + lambda + dim);
+    string error, printed;
+    assert(resolve_quietly(path, map<string, string>(), error, printed) == 73);
+    assert(printed.find("Key NXMAX not found in file " + path + "\n") != string::npos);
+    assert(printed.find("NXMAX not set: derived 73 = round(NA (no CROP_NA) 1.3 / LAMBDA 6.33e-07 x pitch 1.725e-08 "
+                        "x DIM_ROI 2048) clamped to [1, DIM_ROI / 2], pitch = TPCAM 3.45e-06 / ((F_TUBE 0.18 / "
+                        "F_OBJ 0.0018) / RF 0.5)\n") != string::npos);
+
+    // The GUI passes the run's wavelength and ROI on the command line: they override the file as for every key.
+    const map<string, string> blue = {{"LAMBDA", "4.88e-07"}};
+    assert(resolve_quietly(path, blue) == 94);
+    assert(resolve_quietly(path, {{"LAMBDA", "5.32e-07"}}) == 86);
+    assert(resolve_quietly(path, {{"LAMBDA", "4.5e-07"}}) == 102);
+    assert(resolve_quietly(path, {{"DIM_ROI", "1024"}}) == 36);
+    // The same NXMAX as the GUI's formula from 400 to 800 nm on three ROIs.
+    for (int nm = 400; nm <= 800; ++nm)
+        for (int roi : {256, 1024, 2048}) {
+            char text[32];
+            snprintf(text, sizeof text, "%.9g", nm * 1e-9);
+            const map<string, string> overrides = {{"LAMBDA", text}, {"DIM_ROI", to_string(roi)}};
+            assert(resolve_quietly(path, overrides) ==
+                   gui_pupil_radius_bins(1.3, strtod(text, NULL), 3.45e-6, 0.5, 0.0018, 0.18, roi));
+        }
+    // Clamped to [1, DIM_ROI / 2].
+    assert(resolve_quietly(path, {{"TPCAM", "1e-4"}}) == 1024);
+    assert(resolve_quietly(path, {{"NA", "0.001"}}) == 1);
+
+    // CROP_NA (absent: NA) is the crop: Matthieu's off-axis sets crop 1.2 of an objective's NA.
+    write_config(path, optics + lambda + dim + "CROP_NA   1.2   # crop\n");
+    assert(resolve_quietly(path, map<string, string>(), error, printed) == 67);
+    assert(printed.find("derived 67 = round(CROP_NA 1.2 / LAMBDA") != string::npos);
+    assert(resolve_quietly(path, blue) == gui_pupil_radius_bins(1.2, 4.88e-7, 3.45e-6, 0.5, 0.0018, 0.18, 2048));
+    assert(resolve_quietly(path, {{"CROP_NA", "1.3"}}) == 73);
+    // A CROP_NA with only a comment is absent.
+    write_config(path, optics + lambda + dim + "CROP_NA # none\n");
+    assert(resolve_quietly(path) == 73);
+
+    // An NXMAX setting or --NXMAX is used as before, with no derivation.
+    write_config(path, optics + lambda + dim + "NXMAX 80\n");
+    assert(resolve_quietly(path, map<string, string>(), error, printed) == 80);
+    assert(printed == "NXMAX=80\n");
+    assert(resolve_quietly(path, {{"NXMAX", "94"}}) == 94);
+    write_config(path, optics + lambda + dim);
+    assert(resolve_quietly(path, {{"NXMAX", "74"}}, error, printed) == 74);
+    assert(printed == "NXMAX=74 (from args)\n");
+
+    // A missing or non-positive input stops the run with the reason.
+    struct Refusal {
+        const char* config;
+        const char* reason;
+    };
+    const string no_f_obj = "CONFIG_SCHEMA 3\nNA 1.3\nTPCAM 3.45e-6\nRF 0.5\nF_TUBE 0.18\n";
+    const Refusal refusals[] = {
+        {"CONFIG_SCHEMA 3\nTPCAM 3.45e-6\nRF 0.5\nF_OBJ 0.0018\nF_TUBE 0.18\nLAMBDA 6.33e-7\nDIM_ROI 2048\n",
+         "NA is missing"},
+        {"CONFIG_SCHEMA 3\nNA 1.3\nTPCAM 3.45e-6\nRF 0.5\nF_TUBE 0.18\nLAMBDA 6.33e-7\nDIM_ROI 2048\n",
+         "F_OBJ is missing"},
+        {"NA 1.3\nTPCAM 3.45e-6\nRF 0\nF_OBJ 0.0018\nF_TUBE 0.18\nLAMBDA 6.33e-7\nDIM_ROI 2048\n",
+         "RF is not a positive number"},
+        {"NA 1.3\nTPCAM 3.45e-6\nRF 0.5\nF_OBJ 0.0018\nF_TUBE 0.18\nLAMBDA 633nm\nDIM_ROI 2048\n",
+         "LAMBDA is not a positive number"},
+        {"NA 1.3\nCROP_NA -1.2\nTPCAM 3.45e-6\nRF 0.5\nF_OBJ 0.0018\nF_TUBE 0.18\nLAMBDA 6.33e-7\nDIM_ROI 2048\n",
+         "CROP_NA is not a positive number"},
+        {"NA 1.3\nTPCAM 3.45e-6\nRF 0.5\nF_OBJ 0.0018\nF_TUBE 0.18\nLAMBDA 6.33e-7\nDIM_ROI -1\n",
+         "DIM_ROI is not a positive number"},
+        {"NA 1.3\nTPCAM 3.45e-6\nRF 0.5\nF_OBJ 0.0018\nF_TUBE 0.18\nLAMBDA 6.33e-7\nDIM_ROI 2048.5\n",
+         "DIM_ROI is not a whole number of pixels"},
+        {"NA 1.3\nTPCAM 3.45e-6\nRF 0.5\nF_OBJ 0.0018\nF_TUBE 0.18\nLAMBDA nan\nDIM_ROI 2048\n",
+         "LAMBDA is not a positive number"},
+    };
+    for (const Refusal& refusal : refusals) {
+        write_config(path, refusal.config);
+        assert(resolve_quietly(path, map<string, string>(), error, printed) == -1);
+        assert(error.find("NXMAX is not set (no NXMAX in " + path + ", no --NXMAX) and cannot be derived: " +
+                          refusal.reason + " (NXMAX = round(CROP_NA (absent: NA)") == 0);
+        assert(printed.find("NXMAX not set: derived") == string::npos);
+    }
+    // An override can supply the missing input.
+    write_config(path, no_f_obj + lambda + dim);
+    assert(resolve_quietly(path, {{"F_OBJ", "0.0018"}}) == 73);
+
+    assert(std::remove(path.c_str()) == 0);
+}
+
+void check_ampli_ref_source(const string& dir)
+{
+    const string acquisition = dir + "/acquisition.conf", processing = dir + "/processing.conf";
+    const map<string, string> no_overrides;
+    ostringstream messages;
+    streambuf* old_out = cout.rdbuf(messages.rdbuf());
+    write_config(processing, "AMPLI_REF 0\n");
+    // CONFIG_SCHEMA 3: acquisition.conf only (B213 D4).
+    for (const char* schema : {"CONFIG_SCHEMA 3\n", "CONFIG_SCHEMA   3   # current\n", "  CONFIG_SCHEMA\t3\r\n"}) {
+        write_config(acquisition, string(schema) + "AMPLI_REF 1\n");
+        assert(ampli_ref_config_path(acquisition, processing) == acquisition);
+        assert(get_val("AMPLI_REF", ampli_ref_config_path(acquisition, processing), no_overrides) == 1);
+    }
+    assert(messages.str().find("AMPLI_REF from " + acquisition + " (CONFIG_SCHEMA 3)\n") != string::npos);
+    // ... where an absent AMPLI_REF is absent, whatever processing.conf says.
+    write_config(processing, "AMPLI_REF 1\n");
+    write_config(acquisition, "CONFIG_SCHEMA 3\n");
+    assert(get_val("AMPLI_REF", ampli_ref_config_path(acquisition, processing), no_overrides) == 0);
+    // Schemas 1 and 2: processing.conf, as before.
+    write_config(processing, "AMPLI_REF 0\n");
+    for (const char* schema : {"", "CONFIG_SCHEMA 2\n", "CONFIG_SCHEMA 1\n", "CONFIG_SCHEMA # none\n"}) {
+        write_config(acquisition, string(schema) + "AMPLI_REF 1\n");
+        assert(ampli_ref_config_path(acquisition, processing) == processing);
+        assert(get_val("AMPLI_REF", ampli_ref_config_path(acquisition, processing), no_overrides) == 0);
+    }
+    // --AMPLI_REF overrides either file.
+    const map<string, string> overrides = {{"AMPLI_REF", "1"}};
+    assert(get_val("AMPLI_REF", ampli_ref_config_path(acquisition, processing), overrides) == 1);
+    write_config(acquisition, "CONFIG_SCHEMA 3\nAMPLI_REF 1\n");
+    assert(get_val("AMPLI_REF", ampli_ref_config_path(acquisition, processing), {{"AMPLI_REF", "0"}}) == 0);
+    cout.rdbuf(old_out);
+    assert(std::remove(acquisition.c_str()) == 0);
+    assert(std::remove(processing.c_str()) == 0);
+}
+
 } // namespace
 
 int main()
@@ -185,6 +360,8 @@ int main()
     check_role(dir, "acquisition.conf", "config_manip.txt");
     check_role(dir, "processing.conf", "recon.txt");
     check_inline_comments(dir);
+    check_derived_nxmax(dir);
+    check_ampli_ref_source(dir);
     assert(rmdir((dir + "/legacy_schema1").c_str()) == 0);
     assert(rmdir(dir.c_str()) == 0);
     return 0;

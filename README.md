@@ -58,20 +58,29 @@ Paths are read from `~/.config/gui_tomo.conf`:
 | CHEMIN_RESULT | Results directory |
 
 Within `CHEMIN_CONFIG`, acquisition parameters are read from `acquisition.conf`,
-falling back to `config_manip.txt`; processing parameters (including `AMPLI_REF`)
-are read from `processing.conf`, falling back to `recon.txt`. If both names for
+falling back to `config_manip.txt`; processing parameters (including `AMPLI_REF`
+before CONFIG_SCHEMA 3, below) are read from `processing.conf`, falling back to `recon.txt`. If both names for
 either role exist, the program stops with an error naming both files. It prints
 the selected path for each role and never searches `legacy_schema1/` backups.
 If neither name exists, the existing missing-file diagnostics and defaults apply.
-An inline `#` comment after a config value is ignored, and a key with no value (a bare key or blanks only) counts as
+A config line is `KEY value`: the key is the line's first word (leading blanks allowed), separated from the value by
+spaces or tabs (aligned columns work); the value is the rest of the line up to a `#`, without the blanks around it
+(internal ones kept). `KEY=value` is not read. A key with no value (a bare key, blanks or a comment only) counts as
 absent, as in the GUI's numeric reads. The GUI still keeps a comment in its text values, so give a text key
 (`SCAN_PATTERN`, `PIXEL_FORMAT`, ...) its comment on the line above. A path is cut at a `#`: never use one in
 `CHEMIN_ACQUIS`, the folder whose files the program clears before a scan.
 
-The key-value reader ignores unused keys such as `CONFIG_SCHEMA`, `MODALITY`, and
-`QWLSI_MASK_*`; an absent `CONFIG_SCHEMA` remains compatible with schema 1.
+The key-value reader ignores unused keys such as `MODALITY` and `QWLSI_MASK_*`; `CONFIG_SCHEMA` only chooses the
+`AMPLI_REF` file, and an absent `CONFIG_SCHEMA` remains compatible with schema 1.
 Command-line `--KEY value` overrides still take precedence, including
 `--CHEMIN_CONFIG path`.
+
+CONFIG_SCHEMA 3 (the GUI's B213/B211 configs): `NXMAX` is no longer a setting. Without an `NXMAX` line or `--NXMAX`,
+the program derives it as the GUI does, `round(CROP_NA / LAMBDA * TPCAM / Gt * DIM_ROI)` clamped to [1, DIM_ROI/2],
+with `CROP_NA` absent meaning `NA` and Gt = (F_TUBE / F_OBJ) / RF (each input `--KEY` overridable; 73 at 633 nm and
+94 at 488 nm with the 2048 ROI and the live optics), prints it with its inputs, and stops before anything moves when
+an input is missing or not positive. An existing `NXMAX` or `--NXMAX` is used as before. `AMPLI_REF` is read from
+`acquisition.conf` when it says `CONFIG_SCHEMA 3`, from `processing.conf` otherwise (`--AMPLI_REF` overrides both).
 
 Acquisition parameters in `acquisition.conf` (or legacy `config_manip.txt`):
 
@@ -82,6 +91,7 @@ Acquisition parameters in `acquisition.conf` (or legacy `config_manip.txt`):
 | OFFSET_ROI_Y | Camera ROI Y offset (px) |
 | PIXEL_FORMAT | Pixel format: Mono8, Mono12, or Mono16 (default: Mono8) |
 | NB_HOLO | Number of holograms |
+| NXMAX | Crop half-width in Fourier bins; RANDOM_POLAR snaps to its 2 NXMAX grid. Absent: derived (CONFIG_SCHEMA 3, above) |
 | SCAN_PATTERN | Scan pattern name |
 | VXMIN/VXMAX/VYMIN/VYMAX | Mirror voltage range |
 | NA_COND_LIM | Condenser NA limit (0-1] |
