@@ -152,12 +152,42 @@ int main(int argc, char *argv[])
 
     int NXMAX = get_val("NXMAX", manip_config_path, args);
 
+    // B199: an FSM schedule (the settle probe) replaces the scan pattern and NB_HOLO. The whole file is read and checked
+    // here, before the acquis folder is cleared and before anything moves; a refused schedule stops the run.
+    // Only from the command line (the GUI's one-shot probe field): a key left in the live acquisition.conf would turn every
+    // acquisition into a probe without the GUI knowing (B199 review F1), and normal scans print no "key not found" line.
+    const auto fsm_schedule_arg = args.find("FSM_SCHEDULE");
+    const string fsm_schedule_path = fsm_schedule_arg == args.end() ? string() : fsm_schedule_arg->second;
+    if (!fsm_schedule_path.empty()) cout << "FSM_SCHEDULE=" << fsm_schedule_path << " (from args)" << endl;
+    const bool fsm_schedule = !fsm_schedule_path.empty();
+    string fsm_schedule_text;
+    vector<FsmScheduleRow> fsm_schedule_rows;
+    if (fsm_schedule)
+    {
+        string error;
+        if (!read_fsm_schedule(fsm_schedule_path,
+                               get_val("VXMIN", manip_config_path, args), get_val("VXMAX", manip_config_path, args),
+                               get_val("VYMIN", manip_config_path, args), get_val("VYMAX", manip_config_path, args),
+                               get_val("NA_COND_LIM", manip_config_path, args),
+                               fsm_schedule_text, fsm_schedule_rows, error))
+        {
+            cerr << "Invalid FSM schedule " << fsm_schedule_path << ": " << error << "; nothing moved" << endl;
+            return 1;
+        }
+    }
+
     string acquis_dir = acquis_path;
     Var2D holo_dim = {2*NXMAX, 2*NXMAX};
     clear_acquisition(acquis_dir, manip_config_path, recon_path);
 
     // Extract configuration parameters
     MAX_IMAGES = get_val("NB_HOLO", manip_config_path, args);
+    if (fsm_schedule)
+    {
+        cout << "FSM schedule " << fsm_schedule_path << ": " << fsm_schedule_rows.size()
+             << " frames; it replaces NB_HOLO (" << MAX_IMAGES << ") and SCAN_PATTERN" << endl;
+        MAX_IMAGES = fsm_schedule_rows.size();
+    }
     string settle_value = get_string("FSM_SETTLE_MS", manip_config_path, args);
     int fsm_settle_ms = settle_value.empty() ? -1 : atoi(settle_value.c_str());
     if (!settle_value.empty() && (fsm_settle_ms < 0 || fsm_settle_ms > 10000))
@@ -209,54 +239,95 @@ int main(int argc, char *argv[])
     // Generate one authoritative command per captured image.
     string scan_pattern_str = get_string("SCAN_PATTERN", manip_config_path, args);
     int NbCirclesAnnular = get_val("NB_CIRCLES_ANNULAR", manip_config_path, args);
-    cout << "Scan pattern = " << scan_pattern_str << endl;
+    cout << "Scan pattern = " << (fsm_schedule ? string("SCHEDULE (FSM_SCHEDULE; SCAN_PATTERN not used)")
+                                               : scan_pattern_str) << endl;
     vector<ScanFrameCommand> frame_commands;
     string schedule_error;
     string seed_value = get_string("SCAN_SEED", manip_config_path, args);
     const unsigned int random_seed = seed_value.empty()
         ? static_cast<unsigned int>(time(NULL))
         : static_cast<unsigned int>(strtoul(seed_value.c_str(), NULL, 10));
-    if (!build_scan_frame_commands(
-            scan_pattern_str, static_cast<int>(MAX_IMAGES), holo_dim,
-            NbCirclesAnnular,
-            get_val("VXMIN", manip_config_path, args),
-            get_val("VXMAX", manip_config_path, args),
-            get_val("VYMIN", manip_config_path, args),
-            get_val("VYMAX", manip_config_path, args),
-            NAcondLim, random_seed, frame_commands, schedule_error))
+    const bool commands_built = fsm_schedule
+        ? build_fsm_schedule_frame_commands(
+              fsm_schedule_rows,
+              get_val("VXMIN", manip_config_path, args),
+              get_val("VXMAX", manip_config_path, args),
+              get_val("VYMIN", manip_config_path, args),
+              get_val("VYMAX", manip_config_path, args),
+              NAcondLim, frame_commands, schedule_error)
+        : build_scan_frame_commands(
+              scan_pattern_str, static_cast<int>(MAX_IMAGES), holo_dim,
+              NbCirclesAnnular,
+              get_val("VXMIN", manip_config_path, args),
+              get_val("VXMAX", manip_config_path, args),
+              get_val("VYMIN", manip_config_path, args),
+              get_val("VYMAX", manip_config_path, args),
+              NAcondLim, random_seed, frame_commands, schedule_error);
+    if (!commands_built)
     {
         cerr << "Invalid scan schedule: " << schedule_error << endl;
         ParkFsm(&ljDAC_flower);
         return 1;
     }
     const string command_table_path = acquis_path + "/fsm_frame_commands.csv";
-    if (!write_scan_frame_commands_csv(command_table_path, frame_commands, schedule_error))
+    if (!write_scan_frame_commands_csv(command_table_path, frame_commands, schedule_error, fsm_schedule))
     {
         cerr << "Cannot persist scan schedule: " << schedule_error << endl;
         ParkFsm(&ljDAC_flower);
         return 1;
     }
-    vector<ScanFrameCommand> settling_commands = frame_commands;
-    if (b_AmpliRef == 1) {
-        ScanFrameCommand reference_command = settling_commands.back();
-        reference_command.command_vx_v = 0.0;
-        reference_command.command_vy_v = 8.0;
-        settling_commands.push_back(reference_command);
+    if (fsm_schedule)
+    {
+        // The schedule as read and checked, beside the frames.
+        if (!write_fsm_schedule_copy(acquis_path + "/fsm_schedule.csv", fsm_schedule_text, schedule_error))
+        {
+            cerr << "Cannot save the FSM schedule copy: " << schedule_error << endl;
+            ParkFsm(&ljDAC_flower);
+            return 1;
+        }
+        int settle_min = fsm_schedule_rows[0].settle_ms, settle_max = settle_min;
+        for (size_t k = 0; k < fsm_schedule_rows.size(); ++k)
+        {
+            frame_loop_options.frame_settle_ms.push_back(fsm_schedule_rows[k].settle_ms);
+            settle_min = min(settle_min, fsm_schedule_rows[k].settle_ms);
+            settle_max = max(settle_max, fsm_schedule_rows[k].settle_ms);
+        }
+        cout << "FSM settle per frame from the schedule: " << settle_min << "-" << settle_max << " ms"
+             << (settle_value.empty() ? "" : " (FSM_SETTLE_MS not used)") << endl;
+        if (frame_loop_options.overlap)
+            cout << "FSM schedule: sequential frame loop, FSM_OVERLAP 1 not used (in overlap the trigger also waits for "
+                    "the previous frame's transfer, so a short settle would not be the real wait)" << endl;
+        if (b_AmpliRef == 1)
+            cout << "AMPLI_REF 1: an FSM schedule run takes no intensity reference" << endl;
+        cout << "Saved capture-aligned FSM schedule to " << command_table_path << " and "
+             << acquis_path << "/fsm_schedule.csv" << endl;
+        // Only the fallback of a frame without its own settle: none here.
+        fsm_settle_ms = settle_max;
     }
-    const double maximum_command_step_volts =
-        maximum_scan_command_step_volts(settling_commands);
-    if (settle_value.empty()) {
-        fsm_settle_ms = default_fsm_settle_ms(settling_commands);
-        cout << "FSM_SETTLE_MS not set; using " << fsm_settle_ms
-             << " ms for a maximum consecutive command step of "
-             << maximum_command_step_volts << " V" << endl;
-    } else {
-        cout << "FSM settle delay = " << fsm_settle_ms
-             << " ms (explicit), maximum consecutive command step = "
-             << maximum_command_step_volts << " V" << endl;
+    else
+    {
+        vector<ScanFrameCommand> settling_commands = frame_commands;
+        if (b_AmpliRef == 1) {
+            ScanFrameCommand reference_command = settling_commands.back();
+            reference_command.command_vx_v = 0.0;
+            reference_command.command_vy_v = 8.0;
+            settling_commands.push_back(reference_command);
+        }
+        const double maximum_command_step_volts =
+            maximum_scan_command_step_volts(settling_commands);
+        if (settle_value.empty()) {
+            fsm_settle_ms = default_fsm_settle_ms(settling_commands);
+            cout << "FSM_SETTLE_MS not set; using " << fsm_settle_ms
+                 << " ms for a maximum consecutive command step of "
+                 << maximum_command_step_volts << " V" << endl;
+        } else {
+            cout << "FSM settle delay = " << fsm_settle_ms
+                 << " ms (explicit), maximum consecutive command step = "
+                 << maximum_command_step_volts << " V" << endl;
+        }
+        cout << "Saved capture-aligned FSM schedule to " << command_table_path << endl;
+        cout << "Scan seed = " << random_seed << endl;
     }
-    cout << "Saved capture-aligned FSM schedule to " << command_table_path << endl;
-    cout << "Scan seed = " << random_seed << endl;
     frame_loop_options.settle_ms = fsm_settle_ms;
 
     ArvCamera* camera = NULL;
@@ -280,8 +351,8 @@ int main(int argc, char *argv[])
                                frame_loop_options, bytes_per_pixel, cv_type))
                 throw runtime_error("hologram acquisition did not complete");
 
-            // Acquire reference intensity if needed
-            if(b_AmpliRef == 1)
+            // Acquire reference intensity if needed (never in an FSM schedule run: only its own commands move the mirror)
+            if(b_AmpliRef == 1 && !fsm_schedule)
                 if (!AcquireIntensityRef(camera, &ljDAC_flower, acquis_path, dimROI,
                                          offsetROI_X, offsetROI_Y, pixel_format_str,
                                          fsm_settle_ms, bytes_per_pixel, cv_type))
@@ -745,7 +816,8 @@ bool AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
         options.overlap = false;
     // An auto exposure's current value is printed but cannot support a slack check.
     options.exposure_us = fixed_exposure ? exposure_us : std::numeric_limits<double>::quiet_NaN();
-    cout << "Frame loop mode=" << (options.overlap ? "overlap" : "sequential")
+    // An FSM schedule runs sequentially (run_frame_loop): say so here too.
+    cout << "Frame loop mode=" << (options.overlap && options.frame_settle_ms.empty() ? "overlap" : "sequential")
          << " margin_us=" << options.margin_us << " exposure_us=" << frame_timing_number(exposure_us, "unavailable")
          << (fixed_exposure ? "" : " (not fixed)") << endl;
 

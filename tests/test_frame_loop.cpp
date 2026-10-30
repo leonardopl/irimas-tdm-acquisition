@@ -705,8 +705,16 @@ void check_csv_round_trip(const std::string& path, const std::vector<FrameTiming
     refused(header + replace(row0, "2,0,5,", "1,0,5,"), "malformed row 2");          // another schema in a row
     refused(header + replace(row0, "2,0,5,", "2,1,5,"), "malformed row 2");          // not image 0
     refused(header + row0 + row0, "malformed row 3");                                // image 0 twice
-    refused(header + replace(row0, "2,0,5,", "2,0,7,") + text.substr(header.size() + row0.size()),
-            "malformed row 3");                                                      // the settle changes
+    // A settle that changes from row to row (an FSM schedule): every row carries its own, settle is -1.
+    std::ofstream(path.c_str(), std::ios::binary) << header + replace(row0, "2,0,5,", "2,0,7,") +
+                                                     text.substr(header.size() + row0.size());
+    assert(read_frame_timing_csv(path, rows, settle, error) && settle == -1 && rows.size() == lost.size());
+    assert(rows[0].settle_ms == 7 && rows[1].settle_ms == 5 && rows[2].settle_ms == 5);
+    // One settle in every row: the rows keep -1, as before.
+    assert(write_frame_timing_csv(path, lost, 5, error));
+    assert(read_frame_timing_csv(path, rows, settle, error) && settle == 5);
+    for (const FrameTiming& row : rows)
+        assert(row.settle_ms == -1);
     refused(header + replace(row0, "2,0,5,0.000", "2,0,5,abc"), "malformed row 2");  // a number that is not one
     refused(header + row0.substr(0, 20) + "\n", "malformed row 2");                  // a short row
     refused(header + replace(row0, ",100,", ",-100,"), "malformed row 2");            // a negative frame id
@@ -912,6 +920,140 @@ void check_timing()
     std::remove(path.c_str());
 }
 
+// B199: an FSM schedule gives each frame its own settle: the frame sleeps it after its DAC write and its row records it.
+// The loop is sequential also when overlap was requested (in overlap the trigger also waits for the previous frame's
+// transfer, so a short settle would not be the real wait): the steps are the constant-settle sequential loop's, and the
+// summary says sequential, overlap requested, with the schedule as the fallback reason.
+void check_schedule_settle(bool overlap)
+{
+    const std::size_t count = 5;
+    const int settles[] = {3, 20, 0, 7, 1000};
+    FrameLoopOptions config = options(overlap);
+    config.frame_settle_ms.assign(settles, settles + count);
+    FakeIO io(count);
+    std::vector<FrameTiming> rows;
+    assert(run_frame_loop(count, config, io, rows));
+    assert(io.finishes == 1 && io.finished_ok && io.held.empty() && rows.size() == count);
+    assert((io.written == std::vector<std::size_t>{0, 1, 2, 3, 4}));
+    FakeIO constant(count);
+    std::vector<FrameTiming> constant_rows;
+    assert(run_frame_loop(count, options(false), constant, constant_rows));
+    assert(io.events == constant.events);   // the sequential loop's order, whatever overlap said
+    for (std::size_t k = 0; k < count; ++k) {
+        assert(rows[k].settle_ms == settles[k] && constant_rows[k].settle_ms == -1);
+        assert(near(rows[k].trigger_start_ms - rows[k].dac_done_ms, settles[k]));   // exactly the frame's sleep
+        if (k > 0)
+            assert(rows[k].dac_start_ms >= rows[k - 1].written_ms);   // no move before the previous frame is saved
+    }
+    assert(!io.saved_options.overlap && io.saved_options.requested_overlap == overlap);
+    assert(io.saved_options.fallback_reason == (overlap ? fsm_schedule_sequential_reason : ""));
+    assert(io.saved_options.frame_settle_ms == config.frame_settle_ms);
+    FrameTimingSummary summary = check_frame_timing(rows, io.saved_options, fake_clock());
+    assert(!summary.suspect && summary.unsettled_frames == 0 && summary.frames == count && summary.overlap_violations == 0);
+    assert(summary.settle_per_frame && summary.settle_ms_min == 0 && summary.settle_ms_max == 1000);
+    std::string json = summary_json(summary);
+    assert(contains(json, "\"settle_ms\": null,\n  \"settle_ms_min\": 0,\n  \"settle_ms_max\": 1000,\n  \"exposure_us\""));
+    assert(contains(json, "\"mode\": \"sequential\""));
+    assert(contains(json, std::string("\"requested_mode\": \"") + (overlap ? "overlap" : "sequential") + "\""));
+    assert(contains(json, overlap ? "\"fallback_reason\": \"FSM schedule: sequential loop" : "\"fallback_reason\": null"));
+    // The constant run's summary is the old one: settle_ms, no range keys.
+    const FrameTimingSummary constant_summary = check_frame_timing(constant_rows, constant.saved_options, fake_clock());
+    assert(!constant_summary.settle_per_frame && !constant_summary.suspect);
+    const std::string constant_json = summary_json(constant_summary);
+    assert(contains(constant_json, "\"settle_ms\": 5,\n  \"exposure_us\"") && !contains(constant_json, "settle_ms_min"));
+    // The CSV records each frame's settle; it reads back per frame and re-checks to the same verdict.
+    const std::string path = "/tmp/tdm_frame_loop_schedule_" + std::to_string(getpid()) + ".csv";
+    std::string error;
+    assert(write_frame_timing_csv(path, rows, config.settle_ms, error));
+    std::ifstream input(path.c_str());
+    std::string line;
+    std::getline(input, line);
+    for (std::size_t k = 0; k < count; ++k) {
+        std::getline(input, line);
+        assert(line.compare(0, 4 + std::to_string(k).size() + std::to_string(settles[k]).size(),
+                            "2," + std::to_string(k) + "," + std::to_string(settles[k]) + ",") == 0);
+    }
+    std::vector<FrameTiming> read;
+    int settle = 0;
+    assert(read_frame_timing_csv(path, read, settle, error) && settle == -1 && read.size() == count);
+    for (std::size_t k = 0; k < count; ++k)
+        assert(read[k].settle_ms == settles[k]);
+    const FrameClockMapping clock = fake_clock();
+    summary = recheck_frame_timing(read, false, settle, config.exposure_us, config.margin_us, clock.first, clock.last);
+    assert(!summary.suspect && summary.unsettled_frames == 0 && summary.settle_ms_min == 0 && summary.settle_ms_max == 1000);
+    std::remove(path.c_str());
+}
+
+// A settle per frame that does not fit the frames is refused before any DAC write.
+void check_schedule_refused()
+{
+    for (bool overlap : {false, true}) {
+        for (int kind = 0; kind < 2; ++kind) {
+            FrameLoopOptions config = options(overlap);
+            config.frame_settle_ms = kind == 0 ? std::vector<int>{5, 5, 5} : std::vector<int>{5, -1, 5, 5};
+            FakeIO io(4);
+            std::vector<FrameTiming> rows;
+            char log_template[] = "/tmp/tdm_frame_loop_stderr_XXXXXX";
+            const int log_fd = mkstemp(log_template);
+            const std::string log_path = log_template;
+            std::fflush(stderr);
+            const int saved_stderr = dup(2);
+            assert(log_fd >= 0 && saved_stderr >= 0 && dup2(log_fd, 2) == 2);
+            const bool completed = run_frame_loop(4, config, io, rows);
+            std::fflush(stderr);
+            assert(dup2(saved_stderr, 2) == 2 && close(saved_stderr) == 0 && close(log_fd) == 0);
+            std::ifstream log_input(log_path.c_str());
+            const std::string logged((std::istreambuf_iterator<char>(log_input)), std::istreambuf_iterator<char>());
+            std::remove(log_path.c_str());
+            assert(logged == (kind == 0 ? "FSM schedule: 3 settle values for 4 frames: nothing moved\n"
+                                        : "FSM schedule: a negative settle: nothing moved\n"));
+            assert(!completed && io.finishes == 1 && !io.finished_ok && rows.empty() && io.written.empty());
+            assert((io.events == std::vector<std::string>{"save_timing", "stop"}));
+        }
+    }
+}
+
+// The unsettled check uses each row's own settle: a frame exposed 3 ms after its DAC write is unsettled with a 5 ms
+// settle of its own and settled with a 2 ms one, whatever the run's settle; rows without their own keep the run's.
+void check_schedule_unsettled()
+{
+    // check_timing's clock: exposure k starts at 6 + 20 k ms (0.2 ms after its trigger start), uncertainty 0.2 ms.
+    FrameClockLatch first, last;
+    first.valid = last.valid = true;
+    first.camera_ns = 1000000000ULL;
+    first.host_before_ms = -0.1;
+    first.host_after_ms = 0.1;
+    last.camera_ns = 1100000000ULL;
+    last.host_before_ms = 99.8;
+    last.host_after_ms = 100.2;
+    const FrameClockMapping clock = frame_clock_mapping(first, last);
+    auto rows = synthetic_rows();
+    for (FrameTiming& row : rows)
+        row.dac_done_ms = row.trigger_start_ms + 0.2 - 3;   // each exposure starts 3 ms after its DAC write
+    assert(check_frame_timing(rows, false, 2, 244, 500, clock).unsettled_frames == 0);
+    assert(check_frame_timing(rows, false, 5, 244, 500, clock).unsettled_frames == 3);
+    rows[1].settle_ms = 2;
+    auto summary = check_frame_timing(rows, false, 5, 244, 500, clock);
+    assert(summary.unsettled_frames == 2 && (summary.unsettled_images == std::vector<std::size_t>{0, 2}));
+    assert(summary.settle_per_frame && summary.settle_ms_min == 2 && summary.settle_ms_max == 2);
+    rows[0].settle_ms = 5;
+    rows[2].settle_ms = 0;
+    summary = check_frame_timing(rows, false, 2, 244, 500, clock);
+    assert(summary.unsettled_frames == 1 && summary.unsettled_images == std::vector<std::size_t>{0});
+    assert(summary.suspect && summary.settle_ms_min == 0 && summary.settle_ms_max == 5);
+    // The same settle in every row's own field: the verdict of the constant run.
+    for (int settle : {2, 5}) {
+        auto constant = synthetic_rows(), own = synthetic_rows();
+        for (std::size_t k = 0; k < constant.size(); ++k) {
+            constant[k].dac_done_ms = own[k].dac_done_ms = constant[k].trigger_start_ms + 0.2 - 3;
+            own[k].settle_ms = settle;
+        }
+        const auto a = check_frame_timing(constant, true, settle, 244, 500, clock);
+        const auto b = check_frame_timing(own, true, 99, 244, 500, clock);
+        assert(a.suspect == b.suspect && a.unsettled_images == b.unsettled_images);
+    }
+}
+
 } // namespace
 
 int main()
@@ -936,5 +1078,9 @@ int main()
     }
     check_dac_summary();
     check_timing();
+    for (bool overlap : {false, true})
+        check_schedule_settle(overlap);
+    check_schedule_refused();
+    check_schedule_unsettled();
     return 0;
 }

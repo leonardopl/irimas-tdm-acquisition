@@ -89,6 +89,7 @@ Acquisition parameters in `acquisition.conf` (or legacy `config_manip.txt`):
 | FSM_OVERLAP | 0 (default): sequential acquisition; 1: overlap the next mirror move and previous image write with the current frame transfer. Other values are errors. |
 | FSM_OVERLAP_MARGIN_US | Exposure guard added before the next mirror move, in microseconds (default 500; integer range 0-100000). |
 | SCAN_SEED | Optional unsigned seed used to reproduce RANDOM_POLAR schedules |
+| FSM_SCHEDULE | Command line only (`--FSM_SCHEDULE path`, the GUI's one-shot probe field): an FSM schedule (below) that replaces the scan pattern and NB_HOLO for that run. A key in acquisition.conf is ignored. |
 
 ## Scan Patterns
 
@@ -227,7 +228,8 @@ GUI shows that verdict and never rewrites the file). Bump
 the header is copied byte-identical into the GUI repository (its
 `tools/check_frame_timing_sync.sh` compares them).
 The JSON also records `requested_mode` (from `FSM_OVERLAP`), `mode` (actually run),
-`fallback_reason` (`null` without a fallback), `settle_ms`, `exposure_us` (`null`
+`fallback_reason` (`null` without a fallback), `settle_ms` (`null` with
+`settle_ms_min`/`settle_ms_max` for an FSM schedule), `exposure_us` (`null`
 when unavailable or unreliable), and `margin_us`. A local invalid-exposure check
 in the loop also falls back to sequential order and records its reason.
 `id_gaps` counts nonconsecutive transitions; `frames` counts received buffers.
@@ -243,6 +245,59 @@ stdout). A suspect verdict warns and keeps the scan; it does not change the exit
 code. An available but failed/invalid clock latch also warns and marks the timing
 suspect. Hardware timing and camera timestamp semantics still need validation on
 the rig; hardware-free tests cover ordering, buffer cleanup and synthetic clocks.
+
+## FSM schedule (settle probe)
+
+`--FSM_SCHEDULE path` (command line only; a config key is ignored) takes the frames at a list
+of mirror commands, each with its own settle time, instead of a generated scan
+pattern: the FSM settle probe (qwlsi-gui B199) writes such a schedule. The file is
+CSV (UTF-8) with the header `vx_v,vy_v,settle_ms,label` and one row per frame, in
+order: the command in volts, the settle after it in whole milliseconds (0 to 1000)
+and a label without commas (may be empty). Lines starting with `#` and blank lines
+are skipped, also after the header and between rows.
+
+```text
+# 2 V steps, a reference frame after a long wait
+vx_v,vy_v,settle_ms,label
+0.075,-0.102,1000,reference
+2.075,-0.102,2,step 2 V settle 2 ms
+```
+
+The whole file is read and checked before the acquis folder is cleared and before
+the mirror moves: 1 to 4000 rows, every voltage finite and inside `VXMIN..VXMAX` and
+`VYMIN..VYMAX` (1 µV of float rounding allowed; such a value is clamped onto the
+limit), every settle an integer from 0 to 1000, valid limits and `NA_COND_LIM`.
+Any error stops the run with exit code 1 and one stderr line naming the file's
+line (`Invalid FSM schedule <path>: line 7: vy_v 9 V is outside VYMIN..VYMAX
+(-2.7571..2.5481 V); nothing moved`); nothing moves and no frame is taken.
+
+The row count replaces `NB_HOLO` (stdout says so) and `SCAN_PATTERN`, `SCAN_SEED`,
+`NB_CIRCLES_ANNULAR` and `FSM_SETTLE_MS` are not used. The mirror moves to the
+scan centre first, as for a scan, then frame k goes to row k's command and sleeps
+row k's settle after that DAC write before its trigger. The loop is always
+sequential: in overlap the trigger also waits for the previous frame's transfer,
+so a short settle (the probe measures 2-20 ms) would not be the real wait. With
+`FSM_OVERLAP=1` stdout says so, and the summary has `mode` sequential,
+`requested_mode` overlap and the schedule as `fallback_reason`. No intensity
+reference is taken (`AMPLI_REF` is ignored), so only the schedule's commands, the
+scan centre and the 0 V parks move the mirror.
+
+`fsm_frame_commands.csv` keeps its schema and pairs each frame with its command:
+row k has `image_index` and `scan_command_index` k (a scan's row k has k - 1, so
+readers that expect a scan refuse the table), the row's voltages and the
+normalized coordinates a scan command at those voltages would have. A copy of the
+schedule, byte for byte as checked, is saved as `fsm_schedule.csv` beside the
+frames. `frame_timing.csv` records each frame's own settle in its `settle_ms`
+column, and the settle check (unsettled frames) uses it. The summary then has
+`"settle_ms": null` with `"settle_ms_min"` and `"settle_ms_max"`, the range of
+the frames' settles; a scan's summary keeps `"settle_ms"` and has neither key.
+`read_frame_timing_csv` gives every row its own settle when the column changes
+from row to row (and -1 for the file's settle). The verdict rules are unchanged
+(`rules_version` 2): with one settle the check is the same.
+
+The GUI's acquisition panel starts such a run once (Advanced > FSM schedule) and
+records `SCAN_PATTERN SCHEDULE` and the schedule's file name in the run's config;
+it never processes the run as a tomography scan.
 
 ## Usage
 

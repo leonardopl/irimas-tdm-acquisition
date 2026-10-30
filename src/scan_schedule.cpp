@@ -4,8 +4,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cerrno>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
+#include <locale>
 #include <sstream>
 
 namespace {
@@ -174,15 +177,18 @@ bool build_scan_frame_commands(
 bool write_scan_frame_commands_csv(
     const std::string& path,
     const std::vector<ScanFrameCommand>& commands,
-    std::string& error)
+    std::string& error,
+    bool fsm_schedule)
 {
     error.clear();
     if (commands.empty())
         return fail("cannot write an empty frame-command table", error);
     for (std::size_t row = 0; row < commands.size(); ++row) {
         const ScanFrameCommand& command = commands[row];
+        const int scan_command_index = fsm_schedule ? static_cast<int>(row)
+                                                    : (row == 0 ? -1 : static_cast<int>(row) - 1);
         if (command.image_index != static_cast<int>(row)
-            || command.scan_command_index != (row == 0 ? -1 : static_cast<int>(row) - 1)
+            || command.scan_command_index != scan_command_index
             || !finite_pair(command.normalized_scan_x, command.normalized_scan_y)
             || !finite_pair(command.command_vx_v, command.command_vy_v))
             return fail("frame-command table violates its row contract", error);
@@ -252,4 +258,242 @@ int default_fsm_settle_ms(const std::vector<ScanFrameCommand>& commands)
     return step <= kSmallStepLimitVolts && typical <= kSmallTypicalStepLimitVolts ? kSmallStepSettleMilliseconds
         : step <= kTestedStepLimitVolts ? kSettleMilliseconds
         : kConservativeSettleMilliseconds;
+}
+
+namespace {
+
+const char kFsmScheduleHeader[] = "vx_v,vy_v,settle_ms,label";
+const std::streamoff kFsmScheduleMaxBytes = 8 << 20;
+// get_val reads the limits as float: a schedule voltage written as the config's limit can lie just outside them.
+const double kFsmScheduleLimitToleranceVolts = 1e-6;
+
+std::string schedule_number(double value)
+{
+    std::ostringstream text;
+    text.imbue(std::locale::classic());
+    text << value;
+    return text.str();
+}
+
+bool schedule_line_fail(std::size_t line, const std::string& message, std::vector<FsmScheduleRow>& rows,
+                        std::string& error)
+{
+    rows.clear();
+    std::ostringstream text;
+    text << "line " << line << ": " << message;
+    error = text.str();
+    return false;
+}
+
+// The whole field is one finite number in the C locale (blanks around it allowed).
+bool schedule_volts(const std::string& field, double& value)
+{
+    std::istringstream input(field);
+    input.imbue(std::locale::classic());
+    char rest;
+    return (input >> value) && !(input >> rest) && std::isfinite(value);
+}
+
+// Digits only (blanks around them allowed), 0 to kFsmScheduleMaxSettleMs.
+bool schedule_settle(const std::string& field, int& value)
+{
+    const std::size_t begin = field.find_first_not_of(" \t");
+    if (begin == std::string::npos)
+        return false;
+    const std::size_t end = field.find_last_not_of(" \t") + 1;
+    const std::string digits = field.substr(begin, end - begin);
+    if (digits.size() > 4 || digits.find_first_not_of("0123456789") != std::string::npos)
+        return false;
+    value = std::atoi(digits.c_str());
+    return value <= kFsmScheduleMaxSettleMs;
+}
+
+bool schedule_axis(double min, double max)
+{
+    return finite_pair(min, max) && min <= max && std::abs(min) <= kCommandLimit && std::abs(max) <= kCommandLimit;
+}
+
+} // namespace
+
+bool parse_fsm_schedule(
+    const std::string& text,
+    double vxmin,
+    double vxmax,
+    double vymin,
+    double vymax,
+    double na_cond_lim,
+    std::vector<FsmScheduleRow>& rows,
+    std::string& error)
+{
+    rows.clear();
+    error.clear();
+    if (!schedule_axis(vxmin, vxmax))
+        return fail("VXMIN..VXMAX (" + schedule_number(vxmin) + ".." + schedule_number(vxmax) +
+                    " V) is not a range inside +/-10 V", error);
+    if (!schedule_axis(vymin, vymax))
+        return fail("VYMIN..VYMAX (" + schedule_number(vymin) + ".." + schedule_number(vymax) +
+                    " V) is not a range inside +/-10 V", error);
+    if (!std::isfinite(na_cond_lim) || na_cond_lim <= 0.0 || na_cond_lim > 1.0)
+        return fail("NA_COND_LIM must be in (0, 1]: it places the scan centre the mirror starts at", error);
+    bool header = false;
+    std::size_t line_number = 0;
+    for (std::size_t from = 0; from < text.size();) {
+        const std::size_t newline = text.find('\n', from);
+        std::string line = text.substr(from, newline == std::string::npos ? std::string::npos : newline - from);
+        from = newline == std::string::npos ? text.size() : newline + 1;
+        ++line_number;
+        if (line_number == 1 && line.compare(0, 3, "\xEF\xBB\xBF") == 0)
+            line.erase(0, 3);   // a UTF-8 byte order mark
+        if (!line.empty() && line[line.size() - 1] == '\r')
+            line.erase(line.size() - 1);
+        if (line.find_first_not_of(" \t") == std::string::npos || line[0] == '#')
+            continue;
+        if (!header) {
+            if (line != kFsmScheduleHeader)
+                return schedule_line_fail(line_number, std::string("the header must be ") + kFsmScheduleHeader,
+                                          rows, error);
+            header = true;
+            continue;
+        }
+        if (rows.size() == static_cast<std::size_t>(kFsmScheduleMaxRows))
+            return schedule_line_fail(line_number, "more than 4000 rows", rows, error);
+        std::vector<std::string> fields;
+        for (std::size_t start = 0;;) {
+            const std::size_t comma = line.find(',', start);
+            fields.push_back(line.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+            if (comma == std::string::npos)
+                break;
+            start = comma + 1;
+        }
+        if (fields.size() != 4) {
+            std::ostringstream message;
+            message << fields.size() << " fields, not 4 (vx_v,vy_v,settle_ms,label; a label has no commas)";
+            return schedule_line_fail(line_number, message.str(), rows, error);
+        }
+        FsmScheduleRow row;
+        if (!schedule_volts(fields[0], row.vx_v))
+            return schedule_line_fail(line_number, "vx_v '" + fields[0] + "' is not a finite number", rows, error);
+        if (!schedule_volts(fields[1], row.vy_v))
+            return schedule_line_fail(line_number, "vy_v '" + fields[1] + "' is not a finite number", rows, error);
+        if (!schedule_settle(fields[2], row.settle_ms))
+            return schedule_line_fail(line_number, "settle_ms '" + fields[2] + "' is not an integer from 0 to 1000",
+                                      rows, error);
+        if (row.vx_v < vxmin - kFsmScheduleLimitToleranceVolts || row.vx_v > vxmax + kFsmScheduleLimitToleranceVolts)
+            return schedule_line_fail(line_number, "vx_v " + schedule_number(row.vx_v) + " V is outside VXMIN..VXMAX (" +
+                                      schedule_number(vxmin) + ".." + schedule_number(vxmax) + " V)", rows, error);
+        if (row.vy_v < vymin - kFsmScheduleLimitToleranceVolts || row.vy_v > vymax + kFsmScheduleLimitToleranceVolts)
+            return schedule_line_fail(line_number, "vy_v " + schedule_number(row.vy_v) + " V is outside VYMIN..VYMAX (" +
+                                      schedule_number(vymin) + ".." + schedule_number(vymax) + " V)", rows, error);
+        // Clamp the tolerance away: the DAC never gets a command outside the limits.
+        row.vx_v = std::min(std::max(row.vx_v, vxmin), vxmax);
+        row.vy_v = std::min(std::max(row.vy_v, vymin), vymax);
+        row.label = fields[3];
+        rows.push_back(row);
+    }
+    if (!header)
+        return fail(std::string("no header line (") + kFsmScheduleHeader + ")", error);
+    if (rows.empty())
+        return fail("no frames: a schedule has 1 to 4000 rows", error);
+    return true;
+}
+
+bool read_fsm_schedule(
+    const std::string& path,
+    double vxmin,
+    double vxmax,
+    double vymin,
+    double vymax,
+    double na_cond_lim,
+    std::string& text,
+    std::vector<FsmScheduleRow>& rows,
+    std::string& error)
+{
+    text.clear();
+    rows.clear();
+    std::ifstream input(path.c_str(), std::ios::binary);
+    if (!input)
+        return fail(std::string("cannot open it: ") + std::strerror(errno), error);
+    input.seekg(0, std::ios::end);
+    const std::streamoff bytes = input.tellg();
+    if (bytes < 0)
+        return fail("cannot read it", error);
+    if (bytes > kFsmScheduleMaxBytes)
+        return fail("larger than 8 MB", error);
+    input.seekg(0, std::ios::beg);
+    text.assign(static_cast<std::size_t>(bytes), '\0');
+    if (bytes > 0 && !input.read(&text[0], bytes)) {
+        text.clear();
+        return fail("cannot read it", error);
+    }
+    if (!parse_fsm_schedule(text, vxmin, vxmax, vymin, vymax, na_cond_lim, rows, error)) {
+        text.clear();
+        return false;
+    }
+    return true;
+}
+
+bool build_fsm_schedule_frame_commands(
+    const std::vector<FsmScheduleRow>& rows,
+    double vxmin,
+    double vxmax,
+    double vymin,
+    double vymax,
+    double na_cond_lim,
+    std::vector<ScanFrameCommand>& commands,
+    std::string& error)
+{
+    commands.clear();
+    error.clear();
+    if (rows.empty() || rows.size() > static_cast<std::size_t>(kFsmScheduleMaxRows))
+        return fail("an FSM schedule has 1 to 4000 rows", error);
+    if (!schedule_axis(vxmin, vxmax) || !schedule_axis(vymin, vymax)
+        || !std::isfinite(na_cond_lim) || na_cond_lim <= 0.0 || na_cond_lim > 1.0)
+        return fail("invalid FSM schedule limits", error);
+    // The scan's mapping (build_scan_frame_commands): command = normalized * factor + offset.
+    const double factor_x = (std::abs(vxmin) + std::abs(vxmax)) * na_cond_lim / 20.0;
+    const double factor_y = (std::abs(vymin) + std::abs(vymax)) * na_cond_lim / 20.0;
+    const double offset_x = vxmin * na_cond_lim + factor_x * 10.0;
+    const double offset_y = vymin * na_cond_lim + factor_y * 10.0;
+    commands.reserve(rows.size());
+    for (std::size_t k = 0; k < rows.size(); ++k) {
+        const FsmScheduleRow& row = rows[k];
+        if (!finite_pair(row.vx_v, row.vy_v) || row.vx_v < vxmin || row.vx_v > vxmax
+            || row.vy_v < vymin || row.vy_v > vymax) {
+            commands.clear();
+            return fail("FSM schedule row outside its limits", error);
+        }
+        ScanFrameCommand command = {
+            static_cast<int>(k),
+            static_cast<int>(k),
+            factor_x > 0.0 ? (row.vx_v - offset_x) / factor_x : 0.0,
+            factor_y > 0.0 ? (row.vy_v - offset_y) / factor_y : 0.0,
+            row.vx_v,
+            row.vy_v
+        };
+        commands.push_back(command);
+    }
+    return true;
+}
+
+bool write_fsm_schedule_copy(
+    const std::string& path,
+    const std::string& text,
+    std::string& error)
+{
+    error.clear();
+    const std::string temporary = path + ".tmp";
+    std::ofstream out(temporary.c_str(), std::ios::out | std::ios::trunc | std::ios::binary);
+    if (!out)
+        return fail("cannot open " + temporary, error);
+    out.write(text.data(), static_cast<std::streamsize>(text.size()));
+    out.close();
+    if (!out.good()) {
+        std::remove(temporary.c_str());
+        return fail("failed while writing " + temporary, error);
+    }
+    if (std::rename(temporary.c_str(), path.c_str()) != 0) {
+        std::remove(temporary.c_str());
+        return fail("cannot publish " + path, error);
+    }
+    return true;
 }

@@ -2,6 +2,7 @@
 
 #include "frame_timing.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <sstream>
 
@@ -11,6 +12,10 @@ struct FrameLoopOptions {
     std::string fallback_reason;
     int margin_us = 500;
     int settle_ms = 0;
+    // An FSM schedule (B199): frame k waits frame_settle_ms[k] after its DAC write instead of settle_ms, and its timing
+    // row records it. The loop is then sequential whatever overlap says (fsm_schedule_sequential_reason). Empty: every
+    // frame waits settle_ms.
+    std::vector<int> frame_settle_ms;
     double exposure_us = 0;
 };
 
@@ -24,6 +29,11 @@ inline FrameTimingSummary check_frame_timing(std::vector<FrameTiming>& rows, con
     summary.fallback_reason = options.fallback_reason;
     return summary;
 }
+
+// In overlap the trigger also waits for the previous frame's transfer, so a short settle would not be the real wait: the
+// probe of B199 measures settles of 2-20 ms. The summary's fallback_reason when overlap was requested.
+constexpr const char* fsm_schedule_sequential_reason =
+    "FSM schedule: sequential loop, each frame waits its own settle after its DAC write";
 
 inline std::string frame_exposure_diagnostic(bool overlap_requested, const std::string& reason)
 {
@@ -63,11 +73,17 @@ inline bool parse_frame_loop_options(const std::string& overlap, const std::stri
 // IO owns the hardware and clock. Buffer is a nullable handle, kept until write returns.
 // command returns false when a DAC write failed (it is then repeated once).
 // finish saves timing and stops acquisition after every handle is returned, including on failure.
+// A settle per frame (options.frame_settle_ms) must have one value >= 0 per frame: otherwise nothing is commanded. It runs
+// the sequential loop: requested overlap falls back (fsm_schedule_sequential_reason).
 template<class IO>
 bool run_frame_loop(std::size_t count, FrameLoopOptions options, IO& io,
                     std::vector<FrameTiming>& rows)
 {
     options.requested_overlap = options.requested_overlap || options.overlap;
+    if (options.overlap && !options.frame_settle_ms.empty()) {
+        options.overlap = false;
+        options.fallback_reason = fsm_schedule_sequential_reason;
+    }
     if (options.overlap && (!std::isfinite(options.exposure_us) || options.exposure_us <= 0)) {
         options.overlap = false;
         options.fallback_reason = "invalid exposure: overlap requires a finite positive exposure_us";
@@ -84,11 +100,24 @@ bool run_frame_loop(std::size_t count, FrameLoopOptions options, IO& io,
         io.finish(rows, success, options);
         return success;
     };
+    const bool per_frame = !options.frame_settle_ms.empty();
+    if (per_frame && options.frame_settle_ms.size() != count) {
+        std::fprintf(stderr, "FSM schedule: %zu settle values for %zu frames: nothing moved\n",
+                     options.frame_settle_ms.size(), count);
+        return finish(false);
+    }
+    if (per_frame && *std::min_element(options.frame_settle_ms.begin(), options.frame_settle_ms.end()) < 0) {
+        std::fprintf(stderr, "FSM schedule: a negative settle: nothing moved\n");
+        return finish(false);
+    }
+    auto settle = [&](std::size_t k) { return per_frame ? options.frame_settle_ms[k] : options.settle_ms; };
     // A failed DAC write is repeated once, immediately. dac_start_ms stays the first attempt's start; dac_done_ms
     // follows the last attempt, so the settle wait counts from the write that landed. A second failure stops the scan.
     auto command = [&](std::size_t k) {
         rows.push_back(FrameTiming());
         rows[k].image_index = k;
+        if (per_frame)
+            rows[k].settle_ms = options.frame_settle_ms[k];
         rows[k].dac_start_ms = io.now_ms();
         bool written = io.command(k);
         if (!written) {
@@ -120,11 +149,11 @@ bool run_frame_loop(std::size_t count, FrameLoopOptions options, IO& io,
                     write(k - 1, held);
                 return finish(false);
             }
-            io.sleep_until_ms(rows[k].dac_done_ms + options.settle_ms);
+            io.sleep_until_ms(rows[k].dac_done_ms + settle(k));
         } else {
             if (!command(k))
                 return finish(false);
-            io.sleep_for_ms(options.settle_ms); // Preserve the sequential mode's relative wait.
+            io.sleep_for_ms(settle(k)); // Preserve the sequential mode's relative wait.
         }
         rows[k].trigger_start_ms = io.now_ms();
         const bool triggered = io.trigger(k);

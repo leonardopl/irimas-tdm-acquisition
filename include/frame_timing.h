@@ -38,6 +38,9 @@ struct FrameTiming {
     // Not in the CSV: the first DAC write failed and was repeated; the repeat failed too (the scan stopped here).
     bool dac_retried = false;
     bool dac_failed = false;
+    // The frame's own settle (an FSM schedule, B199: a settle per frame); -1: the run's settle_ms. The CSV's settle
+    // column holds the one the frame waited.
+    int settle_ms = -1;
 };
 
 struct FrameClockLatch {
@@ -123,6 +126,10 @@ struct FrameTimingSummary {
     bool requested_overlap = false;
     std::string fallback_reason;
     int settle_ms = 0;
+    // Rows with their own settle (an FSM schedule): the range of the frames' settles. The JSON then has "settle_ms": null
+    // and "settle_ms_min" / "settle_ms_max"; without them it has neither key, as before.
+    bool settle_per_frame = false;
+    int settle_ms_min = 0, settle_ms_max = 0;
     double exposure_us = std::numeric_limits<double>::quiet_NaN();
     int margin_us = 500;
     std::size_t frames = 0;
@@ -147,7 +154,8 @@ struct FrameTimingSummary {
 };
 
 // Pure apart from filling the two derived row columns. Spacing excess above 0.5 ms warns;
-// good runs on 29 Oct had zero excess. Slack and settle checks allow the latch uncertainty.
+// good runs on 29 Oct had zero excess. Slack and settle checks allow the latch uncertainty. A row with its own settle_ms
+// (>= 0) is checked against it, any other against settle_ms: a run with one settle gets the same verdict either way.
 inline FrameTimingSummary check_frame_timing(std::vector<FrameTiming>& rows, bool overlap,
                                              int settle_ms, double exposure_us, int margin_us,
                                              const FrameClockMapping& clock = FrameClockMapping(),
@@ -176,6 +184,12 @@ inline FrameTimingSummary check_frame_timing(std::vector<FrameTiming>& rows, boo
             summary.dac_retry_images.push_back(row.image_index);
         }
         summary.dac_write_failed = summary.dac_write_failed || row.dac_failed;
+        const int frame_settle_ms = row.settle_ms >= 0 ? row.settle_ms : settle_ms;
+        if (row.settle_ms >= 0) {
+            summary.settle_ms_min = summary.settle_per_frame ? std::min(summary.settle_ms_min, row.settle_ms) : row.settle_ms;
+            summary.settle_ms_max = summary.settle_per_frame ? std::max(summary.settle_ms_max, row.settle_ms) : row.settle_ms;
+            summary.settle_per_frame = true;
+        }
         if (row.buffer_ms < 0) {
             summary.suspect = true;
             continue;
@@ -208,7 +222,7 @@ inline FrameTimingSummary check_frame_timing(std::vector<FrameTiming>& rows, boo
             trigger_start_delays.push_back(row.exposure_start_host_ms - row.trigger_start_ms);
             trigger_done_delays.push_back(row.exposure_start_host_ms - row.trigger_done_ms);
             trigger_durations.push_back(row.trigger_done_ms - row.trigger_start_ms);
-            if (row.exposure_start_host_ms < row.dac_done_ms + settle_ms - clock.uncertainty_ms) {
+            if (row.exposure_start_host_ms < row.dac_done_ms + frame_settle_ms - clock.uncertainty_ms) {
                 ++summary.unsettled_frames;
                 summary.unsettled_images.push_back(row.image_index);
             }
@@ -330,9 +344,13 @@ inline bool write_frame_timing_summary(const std::string& path, const FrameTimin
     text << "{\n  \"rules_version\": " << frame_timing_rules_version
          << ",\n  \"mode\": \"" << (summary.overlap ? "overlap" : "sequential") << "\",\n"
          << "  \"requested_mode\": \"" << (summary.requested_overlap ? "overlap" : "sequential") << "\",\n"
-         << "  \"fallback_reason\": " << (summary.fallback_reason.empty() ? "null" : frame_timing_json_string(summary.fallback_reason))
-         << ",\n  \"settle_ms\": " << summary.settle_ms
-         << ",\n  \"exposure_us\": " << frame_timing_number(summary.exposure_us)
+         << "  \"fallback_reason\": " << (summary.fallback_reason.empty() ? "null" : frame_timing_json_string(summary.fallback_reason));
+    if (summary.settle_per_frame)
+        text << ",\n  \"settle_ms\": null,\n  \"settle_ms_min\": " << summary.settle_ms_min
+             << ",\n  \"settle_ms_max\": " << summary.settle_ms_max;
+    else
+        text << ",\n  \"settle_ms\": " << summary.settle_ms;
+    text << ",\n  \"exposure_us\": " << frame_timing_number(summary.exposure_us)
          << ",\n  \"margin_us\": " << summary.margin_us << ",\n"
          << "  \"frames\": " << summary.frames << ",\n  \"id_gaps\": " << summary.id_gaps
          << ",\n  \"spacing_dev_median_ms\": " << frame_timing_number(summary.spacing_dev_median_ms)
@@ -386,7 +404,8 @@ inline bool write_frame_timing_csv(const std::string& path, const std::vector<Fr
                        "trigger_done_ms,buffer_ms,written_ms,frame_id,camera_timestamp_ns,system_timestamp_ns,"
                        "exposure_start_host_ms,next_dac_slack_ms\n");
     for (const FrameTiming& row : rows)
-        std::fprintf(file, "2,%zu,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%s,%s\n", row.image_index, settle_ms,
+        std::fprintf(file, "2,%zu,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%s,%s\n", row.image_index,
+                     row.settle_ms >= 0 ? row.settle_ms : settle_ms,
                      row.dac_start_ms, row.dac_done_ms, row.trigger_start_ms, row.trigger_done_ms, row.buffer_ms,
                      row.written_ms, (unsigned long long)row.frame_id, (unsigned long long)row.camera_timestamp_ns,
                      (unsigned long long)row.system_timestamp_ns,
@@ -418,9 +437,11 @@ inline bool frame_timing_field(std::istringstream& input, const std::string& tex
 }
 
 // frame_timing.csv (schema 2) as write_frame_timing_csv writes it: one row per commanded frame, image_index 0, 1, ...
-// in order; the derived columns (exposure_start_host_ms, next_dac_slack_ms) as written, NaN when empty; settle_ms is the
-// file's settle column (the same value in every row). dac_retried / dac_failed are not in the file and stay false. False
-// with the reason for a file that cannot be read, another header (schema 1 has no derived columns) or a malformed row.
+// in order; the derived columns (exposure_start_host_ms, next_dac_slack_ms) as written, NaN when empty. settle_ms is the
+// file's settle column when it is the same in every row (the rows' own settle_ms then stay -1); when it differs (an FSM
+// schedule) settle_ms is -1 and every row carries its own. dac_retried / dac_failed are not in the file and stay false.
+// False with the reason for a file that cannot be read, another header (schema 1 has no derived columns) or a malformed
+// row.
 inline bool read_frame_timing_csv(const std::string& path, std::vector<FrameTiming>& rows, int& settle_ms,
                                   std::string& error)
 {
@@ -471,8 +492,6 @@ inline bool read_frame_timing_csv(const std::string& path, std::vector<FrameTimi
         for (int k = 0; ok && k < 2; ++k)
             ok = fields[12 + k].empty() || (frame_timing_field(number, fields[12 + k], derived[k]) &&
                                             std::isfinite(derived[k]));
-        if (ok && !rows.empty() && static_cast<int>(settle) != settle_ms)
-            ok = false;
         if (!ok) {
             std::ostringstream reason;
             reason << path << ": malformed row " << row;
@@ -481,7 +500,7 @@ inline bool read_frame_timing_csv(const std::string& path, std::vector<FrameTimi
             settle_ms = 0;
             return false;
         }
-        settle_ms = static_cast<int>(settle);
+        timing.settle_ms = static_cast<int>(settle);
         timing.image_index = static_cast<std::size_t>(index);
         timing.dac_start_ms = values[0];
         timing.dac_done_ms = values[1];
@@ -501,12 +520,19 @@ inline bool read_frame_timing_csv(const std::string& path, std::vector<FrameTimi
         rows.clear();
         return false;
     }
+    bool constant = true;
+    for (std::size_t k = 1; k < rows.size(); ++k)
+        constant = constant && rows[k].settle_ms == rows[0].settle_ms;
+    settle_ms = rows.empty() ? 0 : (constant ? rows[0].settle_ms : -1);
+    if (constant)
+        for (FrameTiming& row : rows)
+            row.settle_ms = -1;
     return true;
 }
 
 // A recorded scan's verdict under the current rules: its frame_timing.csv rows (read_frame_timing_csv; the derived
-// columns are recomputed), the mode, settle, exposure and margin of its summary, and the camera/host latch windows it
-// recorded (latch_before / latch_after). The clock is rebuilt as the program builds it for a camera with the latch nodes.
+// columns are recomputed), the mode, settle (the reader's: -1 when the rows carry their own), exposure and margin of its
+// summary, and the camera/host latch windows it recorded (latch_before / latch_after). The clock is rebuilt as the program builds it for a camera with the latch nodes.
 // The CSV cannot say whether a DAC write failed: the caller keeps the summary's dac_* keys.
 inline FrameTimingSummary recheck_frame_timing(std::vector<FrameTiming>& rows, bool overlap, int settle_ms,
                                                double exposure_us, int margin_us, const FrameClockLatch& first,

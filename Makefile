@@ -35,7 +35,7 @@ FRAME_LOOP_TEST_TARGET = $(BINDIR)/test_frame_loop
 $(TARGET): $(OBJS) | $(BINDIR)
 	$(CXX) -o $@ $^ $(LDFLAGS)
 
-$(OBJDIR)/main.o: main.cpp include/functions.h include/frame_loop.h include/frame_timing.h | $(OBJDIR)
+$(OBJDIR)/main.o: main.cpp include/functions.h include/frame_loop.h include/frame_timing.h include/scan_schedule.h include/scan_functions.h | $(OBJDIR)
 	$(CXX) -c $< $(CXXFLAGS) -o $@
 
 $(OBJDIR)/functions.o: src/functions.cpp include/functions.h | $(OBJDIR)
@@ -44,7 +44,7 @@ $(OBJDIR)/functions.o: src/functions.cpp include/functions.h | $(OBJDIR)
 $(OBJDIR)/scan_functions.o: src/scan_functions.cpp | $(OBJDIR)
 	$(CXX) -c $< $(CXXFLAGS) -o $@
 
-$(OBJDIR)/scan_schedule.o: src/scan_schedule.cpp | $(OBJDIR)
+$(OBJDIR)/scan_schedule.o: src/scan_schedule.cpp include/scan_schedule.h include/scan_functions.h | $(OBJDIR)
 	$(CXX) -c $< $(CXXFLAGS) -o $@
 
 $(TEST_TARGET): tests/test_scan_schedule.cpp src/scan_schedule.cpp src/scan_functions.cpp include/scan_schedule.h include/scan_functions.h include/frame_timing.h | $(BINDIR)

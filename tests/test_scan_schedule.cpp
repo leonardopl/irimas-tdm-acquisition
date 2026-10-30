@@ -6,8 +6,10 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -178,6 +180,164 @@ void check_fermat_rig_fixture()
     assert(!std::getline(fixture, line) && fixture.eof());
 }
 
+// The rig's limits (tests/fixtures/fermat_rings_rig_400.csv) as get_val reads them: float.
+const double kVxmin = float(-3.7759), kVxmax = float(3.9288), kVymin = float(-2.7571), kVymax = float(2.5481);
+const double kNaCondLim = float(0.978);
+
+bool parse(const std::string& text, std::vector<FsmScheduleRow>& rows, std::string& error)
+{
+    return parse_fsm_schedule(text, kVxmin, kVxmax, kVymin, kVymax, kNaCondLim, rows, error);
+}
+
+// One refused schedule: false, no rows, the reason in one line.
+void refused(const std::string& text, const std::string& reason)
+{
+    std::vector<FsmScheduleRow> rows(1);
+    std::string error;
+    const bool ok = parse(text, rows, error);
+    if (ok || !rows.empty() || error.find(reason) == std::string::npos || error.find('\n') != std::string::npos)
+        std::fprintf(stderr, "schedule not refused as expected (%s): %s\n", reason.c_str(), error.c_str());
+    assert(!ok && rows.empty() && error.find(reason) != std::string::npos && error.find('\n') == std::string::npos);
+}
+
+// B199: an FSM schedule (vx_v,vy_v,settle_ms,label) is read whole and every row checked before the program moves.
+void check_fsm_schedule()
+{
+    const std::string header = "vx_v,vy_v,settle_ms,label\n";
+    // Comments and blank lines anywhere, a byte order mark, CRLF, an empty label, the limits themselves (as the config
+    // writes them: the float limits round them by up to ~1e-7 V).
+    const std::string good = "\xEF\xBB\xBF# B199 probe\n" + header +
+        "# fsm_settle_probe.py writes its comments after the header\n"
+        "0.075,-0.102,1000,reference centre\r\n"
+        "# a 2 V move\n"
+        "\n"
+        "2.075,-0.102,2,step 2V settle 2\n"
+        "-3.7759,2.5481,20,\n"
+        "3.9288,-2.7571,0,corner\n";
+    std::vector<FsmScheduleRow> rows;
+    std::string error;
+    assert(parse(good, rows, error) && error.empty() && rows.size() == 4);
+    assert(rows[0].vx_v == 0.075 && rows[0].vy_v == -0.102 && rows[0].settle_ms == 1000);
+    assert(rows[0].label == "reference centre" && rows[1].label == "step 2V settle 2" && rows[2].label.empty());
+    // A value at a limit is kept inside it (clamped by at most the float rounding).
+    const double at_limits[][2] = {{rows[2].vx_v, -3.7759}, {rows[2].vy_v, 2.5481}, {rows[3].vx_v, 3.9288},
+                                   {rows[3].vy_v, -2.7571}};
+    for (const auto& pair : at_limits)
+        assert(std::abs(pair[0] - pair[1]) < 1e-6);
+    for (const FsmScheduleRow& row : rows)
+        assert(row.vx_v >= kVxmin && row.vx_v <= kVxmax && row.vy_v >= kVymin && row.vy_v <= kVymax);
+    assert(rows[2].vx_v == kVxmin);   // float(-3.7759) lies above -3.7759: clamped
+    assert(rows[2].settle_ms == 20 && rows[3].settle_ms == 0);
+
+    // Each refusal names the file's line.
+    refused("", "no header line");
+    refused("# only a comment\n", "no header line");
+    refused(header, "no frames");
+    refused(header + "# no rows\n\n", "no frames");
+    refused("vx,vy,settle_ms,label\n0,0,5,\n", "line 1: the header must be vx_v,vy_v,settle_ms,label");
+    refused("0,0,5,\n", "line 1: the header must be");
+    refused(header + "0,0,5\n", "line 2: 3 fields, not 4");
+    refused(header + "0,0,5,a,b\n", "line 2: 5 fields, not 4");
+    refused(header + "0,0,5,\nnan,0,5,\n", "line 3: vx_v 'nan' is not a finite number");
+    refused(header + "0,inf,5,\n", "line 2: vy_v 'inf' is not a finite number");
+    refused(header + "0,1e999,5,\n", "line 2: vy_v '1e999' is not a finite number");
+    refused(header + ",0,5,\n", "line 2: vx_v '' is not a finite number");
+    refused(header + "0.5V,0,5,\n", "line 2: vx_v '0.5V' is not a finite number");
+    refused(header + "0,0,-1,\n", "line 2: settle_ms '-1' is not an integer from 0 to 1000");
+    refused(header + "0,0,1001,\n", "settle_ms '1001' is not an integer from 0 to 1000");
+    refused(header + "0,0,5.0,\n", "settle_ms '5.0' is not an integer");
+    refused(header + "0,0,,\n", "settle_ms '' is not an integer");
+    refused(header + "0,0,10000,\n", "settle_ms '10000' is not an integer");
+    refused(header + "3.9289,0,5,\n", "line 2: vx_v 3.9289 V is outside VXMIN..VXMAX (-3.7759..3.9288 V)");
+    refused(header + "-3.776,0,5,\n", "line 2: vx_v -3.776 V is outside VXMIN..VXMAX");
+    refused(header + "0,2.5482,5,\n", "line 2: vy_v 2.5482 V is outside VYMIN..VYMAX (-2.7571..2.5481 V)");
+    refused(header + "0,-2.7572,5,\n", "vy_v -2.7572 V is outside VYMIN..VYMAX");
+    refused(header + "0,8,5,\n", "vy_v 8 V is outside");
+    std::string many = header;
+    for (int k = 0; k < kFsmScheduleMaxRows; ++k)
+        many += "0.1,0.2,5,row\n";
+    assert(parse(many, rows, error) && rows.size() == 4000);
+    refused(many + "0.1,0.2,5,one too many\n", "line 4002: more than 4000 rows");
+    // Limits the scans would refuse refuse the schedule too.
+    assert(!parse_fsm_schedule(good, 4, -4, kVymin, kVymax, kNaCondLim, rows, error) && rows.empty());
+    assert(error.find("VXMIN..VXMAX (4..-4 V) is not a range") != std::string::npos);
+    assert(!parse_fsm_schedule(good, kVxmin, kVxmax, -12, kVymax, kNaCondLim, rows, error));
+    assert(!parse_fsm_schedule(good, kVxmin, kVxmax, kVymin, kVymax, 0, rows, error));
+    assert(error.find("NA_COND_LIM must be in (0, 1]") != std::string::npos);
+    assert(!parse_fsm_schedule(good, kVxmin, kVxmax, kVymin, kVymax, NAN, rows, error));
+
+    // The file: read whole, refused with its reason.
+    const std::string path = "/tmp/irimas_fsm_schedule_test_" + std::to_string(getpid()) + ".csv";
+    std::ofstream(path.c_str(), std::ios::binary) << good;
+    std::string text;
+    assert(read_fsm_schedule(path, kVxmin, kVxmax, kVymin, kVymax, kNaCondLim, text, rows, error));
+    assert(text == good && rows.size() == 4);
+    std::ofstream(path.c_str(), std::ios::binary) << header << "0,9,5,\n";
+    assert(!read_fsm_schedule(path, kVxmin, kVxmax, kVymin, kVymax, kNaCondLim, text, rows, error));
+    assert(text.empty() && rows.empty() && error.find("line 2: vy_v 9 V is outside") != std::string::npos);
+    std::remove(path.c_str());
+    assert(!read_fsm_schedule(path, kVxmin, kVxmax, kVymin, kVymax, kNaCondLim, text, rows, error));
+    assert(error.find("cannot open it") != std::string::npos);
+
+    // fsm_frame_commands.csv: row k is schedule row k; the normalized coordinates map back to its voltages as a scan's.
+    assert(parse(good, rows, error));
+    std::vector<ScanFrameCommand> commands;
+    assert(build_fsm_schedule_frame_commands(rows, kVxmin, kVxmax, kVymin, kVymax, kNaCondLim, commands, error));
+    assert(commands.size() == rows.size());
+    const double factor_x = (std::abs(kVxmin) + std::abs(kVxmax)) * kNaCondLim / 20.0;
+    const double factor_y = (std::abs(kVymin) + std::abs(kVymax)) * kNaCondLim / 20.0;
+    const double offset_x = kVxmin * kNaCondLim + factor_x * 10.0;
+    const double offset_y = kVymin * kNaCondLim + factor_y * 10.0;
+    for (std::size_t k = 0; k < rows.size(); ++k) {
+        const ScanFrameCommand& command = commands[k];
+        assert(command.image_index == int(k) && command.scan_command_index == int(k));
+        assert(command.command_vx_v == rows[k].vx_v && command.command_vy_v == rows[k].vy_v);
+        assert(std::abs(command.normalized_scan_x * factor_x + offset_x - rows[k].vx_v) < 1e-12);
+        assert(std::abs(command.normalized_scan_y * factor_y + offset_y - rows[k].vy_v) < 1e-12);
+    }
+    // The scan centre maps to (0, 0); an axis with both limits at 0 V has no mapping and gets 0.
+    std::vector<FsmScheduleRow> centre(1);
+    centre[0].vx_v = offset_x;
+    centre[0].vy_v = offset_y;
+    centre[0].settle_ms = 5;
+    assert(build_fsm_schedule_frame_commands(centre, kVxmin, kVxmax, kVymin, kVymax, kNaCondLim, commands, error));
+    assert(std::abs(commands[0].normalized_scan_x) < 1e-12 && std::abs(commands[0].normalized_scan_y) < 1e-12);
+    centre[0].vx_v = 0;
+    assert(build_fsm_schedule_frame_commands(centre, 0, 0, kVymin, kVymax, kNaCondLim, commands, error));
+    assert(commands[0].normalized_scan_x == 0);
+    centre[0].vx_v = 4;
+    assert(!build_fsm_schedule_frame_commands(centre, kVxmin, kVxmax, kVymin, kVymax, kNaCondLim, commands, error));
+    assert(commands.empty());
+
+    // The table keeps the frame-command schema; the scan contract and the schedule's are told apart.
+    assert(parse(good, rows, error));
+    assert(build_fsm_schedule_frame_commands(rows, kVxmin, kVxmax, kVymin, kVymax, kNaCondLim, commands, error));
+    assert(!write_scan_frame_commands_csv(path, commands, error));
+    assert(write_scan_frame_commands_csv(path, commands, error, true));
+    std::ifstream table(path.c_str());
+    std::string line;
+    std::vector<std::string> lines;
+    while (std::getline(table, line))
+        lines.push_back(line);
+    assert(lines.size() == 5);
+    assert(lines[0] == "schema_version,image_index,scan_command_index,normalized_scan_x,"
+                       "normalized_scan_y,command_vx_v,command_vy_v");
+    assert(lines[1].compare(0, 6, "1,0,0,") == 0 && lines[4].compare(0, 6, "1,3,3,") == 0);
+    std::vector<ScanFrameCommand> scan;
+    assert(build_scan_frame_commands("STAR", 4, Var2D{256, 256}, 3, kVxmin, kVxmax, kVymin, kVymax, kNaCondLim, 1,
+                                     scan, error));
+    assert(!write_scan_frame_commands_csv(path, scan, error, true));
+    std::remove(path.c_str());
+
+    // The copy beside the frames is the text as read, byte for byte.
+    assert(write_fsm_schedule_copy(path, good, error));
+    std::ifstream copy(path.c_str(), std::ios::binary);
+    const std::string copied((std::istreambuf_iterator<char>(copy)), std::istreambuf_iterator<char>());
+    assert(copied == good);
+    std::remove(path.c_str());
+    assert(!write_fsm_schedule_copy("/nonexistent-dir/fsm_schedule.csv", good, error) && !error.empty());
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -206,6 +366,7 @@ int main(int argc, char* argv[])
         check_pattern(pattern, 40);
         check_pattern(pattern, 400);
     }
+    check_fsm_schedule();
 
     std::vector<ScanFrameCommand> commands;
     std::string error;
