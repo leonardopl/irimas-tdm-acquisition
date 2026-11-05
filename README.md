@@ -13,7 +13,7 @@ Key differences from the original [MTD_transmission](https://github.com/madeba/M
 - **SDK migration**: From Pleora eBUS SDK to Aravis; supports any GenICam-compatible camera (GigE Vision, USB3 Vision) without vendor SDK or CTI files
 - **DAC settling fix**: Reference acquisition now waits for DAC settling (100 ms) before image capture, rather than after
 - **Configurable pixel format**: Camera pixel format is configurable (Mono8, Mono12, Mono16) via config file, defaulting to Mono8
-- **SIGINT handling**: Added signal handler to reset DAC outputs on interrupt (Ctrl+C)
+- **Signal handling**: SIGINT (Ctrl+C) and SIGTERM request cooperative shutdown, restoring free run and parking the DAC in normal program context
 - **Error handling**: Structured exception handling with proper camera cleanup on failure
 - **Codebase cleanup**: Translated from French to English; removed unused functions and dead code
 
@@ -23,7 +23,7 @@ Key differences from the original [MTD_transmission](https://github.com/madeba/M
 - LabJack U3 (LV or HV) with LJTick-DAC on FIO4/FIO5
 - Tip-tilt mirror (galvanometric or piezo)
 
-Cameras are looked for on USB3 Vision first; GigE Vision cameras are found when no USB3 Vision camera is connected (Aravis's GigE discovery waits about a second on every search). With both kinds connected, the program uses the USB3 Vision camera.
+Cameras are looked for on USB3 Vision first; GigE Vision cameras are found when no USB3 Vision camera is connected, or when the requested `--CAMERA_ID` is absent from the USB3 list (Aravis's GigE discovery waits about a second on every search). `--CAMERA_ID identity` matches the serial number or Aravis device id, and never substitutes another camera. Without that option, CLI mode prompts when several cameras are found; session mode requires an identity unless exactly one camera is found.
 
 ## Dependencies
 
@@ -318,3 +318,72 @@ it never processes the run as a tomography scan.
 # or
 ./run.sh
 ```
+
+## Session mode
+
+`--SESSION 1` opens one camera and one LabJack connection for multiple acquisitions.
+Configuration files and `--KEY value` overrides resolve as for the CLI. For example:
+
+```bash
+./bin/tdm_acquisition --SESSION 1 --CAMERA_ID 12345678 \
+  --DIM_ROI 1024 --OFFSET_ROI_X 0 --OFFSET_ROI_Y 0 --PIXEL_FORMAT Mono8
+```
+
+`--CHEMIN_CONFIG dir` remains optional. `--CAMERA_ID` accepts a serial number or
+Aravis device id; without it, exactly one discovered camera is required. Session
+mode never reads stdin for a camera choice. The program configures ROI, format
+and software triggering once, then sends `HELLO protocol=1 camera=... serial=...
+model=... vendor=... roi=1024,0,0 format=Mono8`, or `ERROR message=...` and exits
+nonzero on startup failure. Startup does not clear an acquisition folder or move
+the mirror. Human-readable diagnostics go to stderr; stdout contains only protocol replies.
+The binary embeds `TDM_SESSION_PROTOCOL=1` for detection without launching hardware.
+
+The shared header `include/acquisition_protocol.h` (namespace `acquisition_protocol`)
+defines the acquisition program line protocol.
+
+Commands and replies are newline-terminated UTF-8 byte strings. A nonempty word
+without spaces, tabs, quotes or backslashes is bare; otherwise use double quotes,
+escaping only `"` and `\` as `\"` and `\\`. Empty strings are `""`. CR/LF and
+other control characters (except literal tabs) are forbidden inside words. CRLF
+line endings are accepted; incomplete lines wait for their newline.
+
+| Command | Reply and effect |
+|---|---|
+| `EXPOSURE 1234.6` | Turns exposure auto off when supported, writes microseconds, then reads back: `EXPOSURE us=1234 auto=0 error=""`. A failure still replies with read-back values and an error. An absent ExposureAuto node counts as off. |
+| `RUN --CHEMIN_ACQUIS "/data/run 1" --NXMAX 128 --NB_HOLO 400` | Accepts the CLI's `--KEY value` pairs, resolving configuration anew. Replies `DONE status=0 frames=400 error=""`; frames counts saved holograms, excluding the optional intensity reference. |
+| `QUIT` | Restores camera free run, releases the camera, parks the mirror at 0 V and closes the LabJack, then replies `BYE` and exits 0. |
+
+Each RUN must resolve the session's actual DIM_ROI, OFFSET_ROI_X, OFFSET_ROI_Y and
+PIXEL_FORMAT. A mismatch replies `DONE status=1 frames=0 error=...` before clearing
+files or moving the mirror. Each accepted RUN clears its existing output folder,
+starts fresh frame numbering, schedule, stream buffers, clock origin and timing
+state, and writes the same files as a CLI acquisition. Exposure is read again per
+RUN for the fixed-exposure/overlap checks. The connection remains open between RUNs;
+there is no end-of-run park until session cleanup. Invalid configuration and scan
+schedules are validated before clearing or moving in both modes.
+
+Empty lines are ignored. Malformed lines and unknown commands receive `ERROR
+message=...` and leave the session usable. Commands received during RUN are queued
+until its DONE. A failed acquisition returns its existing process status in DONE,
+mapped to the shell's exit value (`return_value & 0xff`: -1 becomes 255, 256 becomes 0).
+Failure of one RUN leaves the session available for QUIT or another RUN.
+
+In both modes SIGINT and SIGTERM only set a stop flag. The frame loop saves the
+current frame, returns its buffers, stops its stream and writes partial timing;
+the reference capture checks the flag between steps. Normal cleanup restores free
+run, closes the camera, parks at 0 V and releases the LabJack. A stopped run exits
+with status 1, matching the former SIGINT behavior. The existing 5 s buffer wait
+and the current frame's exposure/settle can delay the stop.
+
+In session mode stdin EOF, including an incomplete last line, requests the same
+stop; that incomplete line is never executed. EOF while idle cleans up and exits 0
+without BYE. EOF or a signal during RUN produces DONE with status 1, cleans up and
+exits 1. SIGPIPE is ignored so a disconnected reply pipe cannot bypass cleanup.
+Only SIGKILL bypasses cooperative cleanup.
+
+`make test` includes the shared-header tests, cooperative-stop frame-loop tests,
+a binary marker check, and session/CLI integration tests with only the Aravis Fake
+interface enabled and a simulated LabJack. The integration test isolates HOME/XDG
+configuration in a temporary directory and skips explicitly with status 77 only
+if the Fake interface is missing. Fake lacks ExposureAuto and TimestampLatch nodes;
+their absent-node behavior is tested. Actual hardware timing still needs the rig.

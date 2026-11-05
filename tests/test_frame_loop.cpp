@@ -1054,6 +1054,60 @@ void check_schedule_unsettled()
     }
 }
 
+// A stop arriving during frame acquisition saves that frame, returns every buffer and finishes
+// partial timing. In overlap a speculative next DAC row is allowed, but never another trigger.
+void check_stop(bool overlap)
+{
+    FakeIO io(5);
+    FrameLoopOptions config = options(overlap);
+    bool delivered = false;
+    config.stop_requested = [&]() {
+        if (!delivered && std::find(io.events.begin(), io.events.end(), "trigger1") != io.events.end()) {
+            delivered = true;
+            return true; // Even a one-shot stop request must be latched until finish.
+        }
+        return false;
+    };
+    std::vector<FrameTiming> rows;
+    assert(!run_frame_loop(5, config, io, rows));
+    assert(io.finishes == 1 && !io.finished_ok && io.held.empty());
+    assert((io.written == std::vector<std::size_t>{0, 1}));
+    assert(io.pushes[0] == 1 && io.pushes[1] == 1 && io.pushes[2] == 0);
+    assert(std::find(io.events.begin(), io.events.end(), "trigger2") == io.events.end());
+    assert(io.saved.size() == rows.size() && rows[1].written_ms >= 0);
+    assert(position(io, "push1") < position(io, "save_timing"));
+    assert(position(io, "save_timing") < position(io, "stop"));
+    io.events.clear(); io.written.clear(); io.pushes.assign(5, 0); io.time = io.ready = 0;
+    assert(run_frame_loop(5, config, io, rows)); // The previous loop's stop latch must be fresh.
+    assert(io.finishes == 2 && io.held.empty() && io.written.size() == 5 && rows.size() == 5);
+    FakeIO idle(5);
+    config.stop_requested = []() { return true; };
+    assert(!run_frame_loop(5, config, idle, rows));
+    assert(rows.empty() && idle.held.empty() && idle.finishes == 1);
+    assert((idle.events == std::vector<std::string>{"save_timing", "stop"}));
+}
+
+// The generic loop has no retained rows, held buffer or command index when reused on one IO.
+// Production uses a new adapter (and hence clock/latches) for each run on the same connection.
+void check_repeated_loops(bool overlap)
+{
+    FakeIO io(3);
+    std::vector<FrameTiming> rows;
+    const auto config = options(overlap);
+    assert(run_frame_loop(3, config, io, rows));
+    const auto first = rows;
+    assert(io.held.empty());
+    io.events.clear(); io.written.clear(); io.pushes.assign(3, 0);
+    io.time = 0; io.ready = 0;
+    assert(run_frame_loop(3, config, io, rows));
+    assert(io.finishes == 2 && io.held.empty() && rows.size() == first.size());
+    for (std::size_t k = 0; k < rows.size(); ++k) {
+        assert(rows[k].image_index == k && rows[k].dac_start_ms == first[k].dac_start_ms);
+        assert(rows[k].buffer_ms == first[k].buffer_ms && rows[k].written_ms == first[k].written_ms);
+        assert(rows[k].camera_timestamp_ns == first[k].camera_timestamp_ns && io.pushes[k] == 1);
+    }
+}
+
 } // namespace
 
 int main()
@@ -1082,5 +1136,6 @@ int main()
         check_schedule_settle(overlap);
     check_schedule_refused();
     check_schedule_unsettled();
+    for (bool overlap : {false, true}) { check_stop(overlap); check_repeated_loops(overlap); }
     return 0;
 }

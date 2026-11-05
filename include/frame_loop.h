@@ -4,9 +4,13 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <functional>
 #include <sstream>
 
 struct FrameLoopOptions {
+    // Cooperative cancellation, checked between frames. The current frame is saved and every
+    // buffer is returned before finish(rows, false, ...) writes partial timing and stops acquisition.
+    std::function<bool()> stop_requested;
     bool overlap = false;
     bool requested_overlap = false;
     std::string fallback_reason;
@@ -139,9 +143,21 @@ bool run_frame_loop(std::size_t count, FrameLoopOptions options, IO& io,
         io.progress(k, buffer);
         return true;
     };
+    bool stop_latched = false;
+    auto stopped = [&]() {
+        stop_latched = stop_latched || (options.stop_requested && options.stop_requested());
+        return stop_latched;
+    };
+    if (stopped())
+        return finish(false);
     if (options.overlap && count > 0)
         command(0);
     for (std::size_t k = 0; k < count; ++k) {
+        if (stopped()) {
+            if (held)
+                write(k - 1, held);
+            return finish(false);
+        }
         if (options.overlap) {
             // Command k failed after frame k - 1's exposure: keep that frame, as a failed trigger k would.
             if (rows[k].dac_failed) {
@@ -165,7 +181,7 @@ bool run_frame_loop(std::size_t count, FrameLoopOptions options, IO& io,
         }
         if (options.overlap) {
             io.sleep_until_ms(rows[k].trigger_done_ms + (options.exposure_us + options.margin_us) / 1000.0);
-            if (k + 1 < count)
+            if (k + 1 < count && !stopped())
                 command(k + 1); // A failed write stops the scan at the next iteration, after frame k is saved.
             if (held) {
                 if (!write(k - 1, held))
@@ -193,5 +209,5 @@ bool run_frame_loop(std::size_t count, FrameLoopOptions options, IO& io,
     }
     if (held && !write(count - 1, held))
         return finish(false);
-    return finish(true);
+    return finish(!stopped());
 }

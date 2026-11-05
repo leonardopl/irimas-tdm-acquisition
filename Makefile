@@ -32,11 +32,13 @@ TEST_TARGET = $(BINDIR)/test_scan_schedule
 CONFIG_TEST_TARGET = $(BINDIR)/test_config_resolution
 FRAME_LOOP_TEST_TARGET = $(BINDIR)/test_frame_loop
 CAMERA_DISCOVERY_TEST_TARGET = $(BINDIR)/test_camera_discovery
+ACQUISITION_PROTOCOL_TEST_TARGET = $(BINDIR)/test_acquisition_protocol
+SESSION_TEST_TARGET = $(BINDIR)/test_session
 
 $(TARGET): $(OBJS) | $(BINDIR)
 	$(CXX) -o $@ $^ $(LDFLAGS)
 
-$(OBJDIR)/main.o: main.cpp include/functions.h include/camera_discovery.h include/frame_loop.h include/frame_timing.h include/scan_schedule.h include/scan_functions.h | $(OBJDIR)
+$(OBJDIR)/main.o: main.cpp include/acquisition_protocol.h include/functions.h include/camera_discovery.h include/frame_loop.h include/frame_timing.h include/scan_schedule.h include/scan_functions.h | $(OBJDIR)
 	$(CXX) -c $< $(CXXFLAGS) -o $@
 
 $(OBJDIR)/functions.o: src/functions.cpp include/functions.h | $(OBJDIR)
@@ -60,11 +62,21 @@ $(FRAME_LOOP_TEST_TARGET): tests/test_frame_loop.cpp include/frame_loop.h includ
 $(CAMERA_DISCOVERY_TEST_TARGET): tests/test_camera_discovery.cpp include/camera_discovery.h | $(BINDIR)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
-test: $(TEST_TARGET) $(CONFIG_TEST_TARGET) $(FRAME_LOOP_TEST_TARGET) $(CAMERA_DISCOVERY_TEST_TARGET)
+$(ACQUISITION_PROTOCOL_TEST_TARGET): tests/test_acquisition_protocol.cpp include/acquisition_protocol.h | $(BINDIR)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+# Includes main.cpp with a renamed entry point so only the fixture can inject simulated hardware.
+$(SESSION_TEST_TARGET): tests/test_session.cpp main.cpp include/acquisition_protocol.h include/functions.h include/camera_discovery.h include/frame_loop.h include/frame_timing.h include/scan_schedule.h include/scan_functions.h $(OBJDIR)/functions.o $(OBJDIR)/scan_schedule.o $(OBJDIR)/scan_functions.o | $(BINDIR)
+	$(CXX) $(CXXFLAGS) $< $(OBJDIR)/functions.o $(OBJDIR)/scan_schedule.o $(OBJDIR)/scan_functions.o -o $@ $(LDFLAGS)
+
+test: $(TARGET) $(TEST_TARGET) $(CONFIG_TEST_TARGET) $(FRAME_LOOP_TEST_TARGET) $(CAMERA_DISCOVERY_TEST_TARGET) $(ACQUISITION_PROTOCOL_TEST_TARGET) $(SESSION_TEST_TARGET)
 	./$(TEST_TARGET)
 	./$(CONFIG_TEST_TARGET)
 	./$(FRAME_LOOP_TEST_TARGET)
 	./$(CAMERA_DISCOVERY_TEST_TARGET)
+	./$(ACQUISITION_PROTOCOL_TEST_TARGET)
+	./$(SESSION_TEST_TARGET) || test $$? -eq 77
+	test "$$(grep -c TDM_SESSION_PROTOCOL=1 $(TARGET))" -ge 1
 
 fermat-fixture: $(TEST_TARGET)
 	./$(TEST_TARGET) --write-fermat-fixture tests/fixtures/fermat_rings_rig_400.csv
@@ -73,6 +85,6 @@ $(OBJDIR) $(BINDIR):
 	mkdir -p $@
 
 clean:
-	rm -f $(OBJDIR)/*.o $(TARGET) $(TEST_TARGET) $(CONFIG_TEST_TARGET) $(FRAME_LOOP_TEST_TARGET) $(CAMERA_DISCOVERY_TEST_TARGET)
+	rm -f $(OBJDIR)/*.o $(TARGET) $(TEST_TARGET) $(CONFIG_TEST_TARGET) $(FRAME_LOOP_TEST_TARGET) $(CAMERA_DISCOVERY_TEST_TARGET) $(ACQUISITION_PROTOCOL_TEST_TARGET) $(SESSION_TEST_TARGET)
 
 .PHONY: clean test fermat-fixture

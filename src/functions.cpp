@@ -171,21 +171,36 @@ string ampli_ref_config_path(const string& acquisition_path, const string& proce
     return acquisition_path;
 }
 
-int clear_acquisition(string  rep, string chemin_config_manip,string chemin_recon)
+int clear_acquisition(string rep, string chemin_config_manip, string chemin_recon, string& error)
 {
-    const char * rep_c=rep.c_str();
-    DIR *theFolder = opendir(rep_c);
-    struct dirent *next_file;
-    char filepath[512];
-
-    while ( (next_file = readdir(theFolder)) != NULL )
-    {
-        snprintf(filepath, sizeof(filepath), "%s/%s", rep_c, next_file->d_name);
-        if(filepath!=chemin_config_manip && filepath!=chemin_recon)
-        remove(filepath);
+    error.clear();
+    auto fail = [&](const string& operation, int code) {
+        error = "Cannot clear acquisition directory " + rep + ": " + operation + ": " + strerror(code);
+    };
+    DIR* folder = opendir(rep.c_str());
+    if (!folder) {
+        fail("opendir", errno);
+        return 1;
     }
-    closedir(theFolder);
-    return 0;
+    for (;;) {
+        errno = 0;
+        const dirent* entry = readdir(folder);
+        if (!entry) {
+            if (errno) fail("readdir", errno);
+            break;
+        }
+        const string name = entry->d_name;
+        if (name == "." || name == "..") continue;
+        const string filepath = rep + "/" + name;
+        if (filepath == chemin_config_manip || filepath == chemin_recon) continue;
+        if (remove(filepath.c_str()) != 0) {
+            const int code = errno;
+            fail("remove " + filepath, code);
+            break;
+        }
+    }
+    if (closedir(folder) != 0 && error.empty()) fail("closedir", errno);
+    return error.empty() ? 0 : 1;
 }
 
 namespace {

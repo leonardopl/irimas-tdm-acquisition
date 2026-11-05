@@ -44,5 +44,7 @@ bool resolve_nxmax(const string& file_path, const map<string, string>& overrides
 // The file AMPLI_REF is read from: the acquisition config when it is CONFIG_SCHEMA 3 (AMPLI_REF lives only there),
 // else the processing config as before (schemas 1 and 2 carry it in both files).
 string ampli_ref_config_path(const string& acquisition_path, const string& processing_path);
-int clear_acquisition(string  rep, string chemin_config_manip,string chemin_recon);
+// Clear entries except the two live configs. Returns 0 on success, 1 on any open/read/remove/close
+// failure, with error naming the acquisition folder and the failed operation. May partially clear.
+int clear_acquisition(string rep, string chemin_config_manip, string chemin_recon, string& error);
 #endif
