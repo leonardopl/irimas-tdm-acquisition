@@ -23,6 +23,8 @@ Key differences from the original [MTD_transmission](https://github.com/madeba/M
 - LabJack U3 (LV or HV) with LJTick-DAC on FIO4/FIO5
 - Tip-tilt mirror (galvanometric or piezo)
 
+Cameras are looked for on USB3 Vision first; GigE Vision cameras are found when no USB3 Vision camera is connected (Aravis's GigE discovery waits about a second on every search). With both kinds connected, the program uses the USB3 Vision camera.
+
 ## Dependencies
 
 - [Aravis](https://github.com/AravisProject/aravis) (0.8.x)

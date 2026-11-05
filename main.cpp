@@ -17,6 +17,7 @@ using namespace std;
 #include "Ljack_DAC.h"
 #include "macros.h"
 #include "vChronos.h"
+#include "camera_discovery.h"
 #include "frame_timing.h"
 #include "frame_loop.h"
 #include <thread>
@@ -401,25 +402,38 @@ int main(int argc, char *argv[])
 // Select and connect to GenICam camera
 ArvCamera* SelectAndConnectCamera()
 {
-    arv_update_device_list();
-    unsigned int n_devices = arv_get_n_devices();
+    vector<unsigned int> unique_devices;
+    const unsigned int n_cameras = DiscoverCameras([&unique_devices](bool network) -> unsigned int {
+        if (network)
+        {
+            cout << "No USB3 Vision camera: looking for GigE Vision cameras too" << endl;
+            arv_enable_interface("GigEVision");
+        }
+        else
+            arv_disable_interface("GigEVision");
+        arv_update_device_list();
 
-    if (n_devices == 0)
+        // Build deduplicated device list (by serial + protocol) for this pass; a camera without a serial is
+        // never merged with another (the GUI's rule, include/camera_discovery.h there).
+        set<string> seen_keys;
+        unique_devices.clear();
+        const unsigned int n_devices = arv_get_n_devices();
+        for (unsigned int i = 0; i < n_devices; i++)
+        {
+            const char* serial = arv_get_device_serial_nbr(i);
+            const char* protocol = arv_get_device_protocol(i);
+            string key = serial && *serial ? "serial:" + string(serial) + "|" + (protocol ? protocol : "")
+                                           : "index:" + to_string(i);
+            if (seen_keys.insert(key).second)
+                unique_devices.push_back(i);
+        }
+        return static_cast<unsigned int>(unique_devices.size());
+    });
+
+    if (n_cameras == 0)
     {
         cout << "No cameras found!" << endl;
         return NULL;
-    }
-
-    // Build deduplicated device list (by serial + protocol)
-    set<string> seen_keys;
-    vector<unsigned int> unique_devices;
-    for (unsigned int i = 0; i < n_devices; i++)
-    {
-        const char* serial = arv_get_device_serial_nbr(i);
-        const char* protocol = arv_get_device_protocol(i);
-        string key = string(serial ? serial : to_string(i)) + "|" + (protocol ? protocol : "");
-        if (seen_keys.insert(key).second)
-            unique_devices.push_back(i);
     }
 
     cout << "Found " << unique_devices.size() << " camera(s):" << endl;

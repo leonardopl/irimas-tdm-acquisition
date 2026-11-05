@@ -31,11 +31,12 @@ OBJS   = $(OBJDIR)/main.o $(OBJDIR)/functions.o $(OBJDIR)/scan_functions.o $(OBJ
 TEST_TARGET = $(BINDIR)/test_scan_schedule
 CONFIG_TEST_TARGET = $(BINDIR)/test_config_resolution
 FRAME_LOOP_TEST_TARGET = $(BINDIR)/test_frame_loop
+CAMERA_DISCOVERY_TEST_TARGET = $(BINDIR)/test_camera_discovery
 
 $(TARGET): $(OBJS) | $(BINDIR)
 	$(CXX) -o $@ $^ $(LDFLAGS)
 
-$(OBJDIR)/main.o: main.cpp include/functions.h include/frame_loop.h include/frame_timing.h include/scan_schedule.h include/scan_functions.h | $(OBJDIR)
+$(OBJDIR)/main.o: main.cpp include/functions.h include/camera_discovery.h include/frame_loop.h include/frame_timing.h include/scan_schedule.h include/scan_functions.h | $(OBJDIR)
 	$(CXX) -c $< $(CXXFLAGS) -o $@
 
 $(OBJDIR)/functions.o: src/functions.cpp include/functions.h | $(OBJDIR)
@@ -56,10 +57,14 @@ $(CONFIG_TEST_TARGET): tests/test_config_resolution.cpp src/functions.cpp includ
 $(FRAME_LOOP_TEST_TARGET): tests/test_frame_loop.cpp include/frame_loop.h include/frame_timing.h | $(BINDIR)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
-test: $(TEST_TARGET) $(CONFIG_TEST_TARGET) $(FRAME_LOOP_TEST_TARGET)
+$(CAMERA_DISCOVERY_TEST_TARGET): tests/test_camera_discovery.cpp include/camera_discovery.h | $(BINDIR)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+test: $(TEST_TARGET) $(CONFIG_TEST_TARGET) $(FRAME_LOOP_TEST_TARGET) $(CAMERA_DISCOVERY_TEST_TARGET)
 	./$(TEST_TARGET)
 	./$(CONFIG_TEST_TARGET)
 	./$(FRAME_LOOP_TEST_TARGET)
+	./$(CAMERA_DISCOVERY_TEST_TARGET)
 
 fermat-fixture: $(TEST_TARGET)
 	./$(TEST_TARGET) --write-fermat-fixture tests/fixtures/fermat_rings_rig_400.csv
@@ -68,6 +73,6 @@ $(OBJDIR) $(BINDIR):
 	mkdir -p $@
 
 clean:
-	rm -f $(OBJDIR)/*.o $(TARGET) $(TEST_TARGET) $(CONFIG_TEST_TARGET) $(FRAME_LOOP_TEST_TARGET)
+	rm -f $(OBJDIR)/*.o $(TARGET) $(TEST_TARGET) $(CONFIG_TEST_TARGET) $(FRAME_LOOP_TEST_TARGET) $(CAMERA_DISCOVERY_TEST_TARGET)
 
 .PHONY: clean test fermat-fixture
