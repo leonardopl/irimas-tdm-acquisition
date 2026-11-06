@@ -139,7 +139,8 @@ struct RunConfig {
     unsigned int b_AmpliRef = 0;
     vector<ScanFrameCommand> frame_commands;
 
-    bool resolve(const map<string, string>& args, string& error) {
+    // Session startup needs only paths and camera settings; RUN supplies its own scan overrides.
+    bool resolveConnection(const map<string, string>& args, string& error) {
         // Initialize paths and configuration
         string home = getenv("HOME") ? getenv("HOME") : "";
         string gui_tomo_suffix = "/.config/gui_tomo.conf";
@@ -147,7 +148,6 @@ struct RunConfig {
         cout << "Reading paths from " << gui_config_path << endl;
 
         config_dir = get_string("CHEMIN_CONFIG", home + gui_tomo_suffix, args);
-        acquis_path = get_string("CHEMIN_ACQUIS", home + gui_tomo_suffix, args);
         string config_error;
         if (!resolve_config_path(config_dir, "acquisition.conf", "config_manip.txt",
                                  manip_config_path, config_error) ||
@@ -170,6 +170,12 @@ struct RunConfig {
             cout << "PIXEL_FORMAT not set or invalid, defaulting to Mono8" << endl;
             pixel_format_str = "Mono8";
         }
+        return true;
+    }
+
+    bool resolve(const map<string, string>& args, string& error) {
+        if (!resolveConnection(args, error)) return false;
+        acquis_path = get_string("CHEMIN_ACQUIS", gui_config_path, args);
         bytes_per_pixel = (pixel_format_str == "Mono8") ? 1 : 2;
         cv_type = (pixel_format_str == "Mono8") ? CV_8UC1 : CV_16UC1;
 
@@ -400,6 +406,8 @@ struct Connection {
     void close() {
         if (closed) return;
         closed = true;
+        // Camera teardown can block on register timeouts; park before it can delay shutdown.
+        if (dac && dac_connected) ParkFsm(dac.get());
         if (camera) {
             cout << "Closing camera" << endl;
             RestoreFreeRun(camera);
@@ -407,7 +415,6 @@ struct Connection {
             camera = NULL;
         }
         arv_shutdown();
-        if (dac && dac_connected) ParkFsm(dac.get());
         dac.reset();
         host.reset();
     }
@@ -630,7 +637,7 @@ static int RunSession(const map<string, string>& launch_args, SessionReplies& re
     Connection connection;
     RunConfig initial;
     string error;
-    if (!initial.resolve(launch_args, error)) {
+    if (!initial.resolveConnection(launch_args, error)) {
         replies.send("ERROR", {{"message", error}});
         return 1;
     }

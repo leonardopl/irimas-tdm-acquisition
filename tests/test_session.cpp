@@ -184,8 +184,9 @@ struct Child {
     }
     void cleaned() const {
         const string events = contents(audit);
-        require(events.find("free_run 1 0\n") != string::npos, "camera not restored to free run: " + events);
-        require(events.size() >= 8 && events.substr(events.size() - 8) == "dac 0 0\n", "DAC not parked: " + events);
+        const string cleanup = "dac 0 0\nfree_run 1 0\n";
+        require(events.size() >= cleanup.size() && events.substr(events.size() - cleanup.size()) == cleanup,
+                "DAC not parked before camera teardown: " + events);
         require(events.find("free_run 0") == string::npos, "free-run restore failed");
     }
     ~Child() {
@@ -315,7 +316,49 @@ static void idleEof(Scratch& scratch, const string& identity, bool incomplete)
     if (incomplete) child.sendRaw("RUN --CHEMIN_ACQUIS \"unfinished");
     child.closeInput(); child.expectEof();
     require(child.wait() == 0, "idle EOF exit was nonzero"); child.cleaned();
-    require(contents(child.audit) == "free_run 1 0\ndac 0 0\n", "idle EOF moved the DAC before parking");
+    require(contents(child.audit) == "dac 0 0\nfree_run 1 0\n", "idle EOF did not park before camera teardown");
+}
+
+static void deferredRunConfig(Scratch& scratch, const string& identity)
+{
+    const string valid_config = contents(scratch.config + "/acquisition.conf");
+    const vector<pair<string, string>> invalid_settings = {
+        {"NXMAX 8\n", ""}, // Missing optics make derivation impossible without the RUN's --NXMAX.
+        {"SCAN_PATTERN FERMAT\n", "SCAN_PATTERN invalid\n"},
+        {"FSM_SETTLE_MS 0\n", "FSM_SETTLE_MS -2\n"},
+        {"FSM_OVERLAP 0\n", "FSM_OVERLAP 2\n"},
+        {"FSM_OVERLAP_MARGIN_US 500\n", "FSM_OVERLAP_MARGIN_US -1\n"}
+    };
+    for (size_t i = 0; i < invalid_settings.size(); ++i) {
+        string config = valid_config;
+        const auto& setting = invalid_settings[i];
+        const size_t position = config.find(setting.first);
+        require(position != string::npos, "missing fixture setting " + setting.first);
+        config.replace(position, setting.first.size(), setting.second);
+        put(scratch.config + "/acquisition.conf", config);
+        const string name = "deferred-config-" + to_string(i), folder = scratch.directory(name);
+        put(folder + "/sentinel", "untouched");
+        // Exercise both launch overrides and settings taken from the live config.
+        const vector<string> args = i % 2 == 0 ? launch(identity)
+            : vector<string>{"--SESSION", "1", "--CAMERA_ID", identity};
+        Child child(scratch, name, args);
+        const auto hello = child.reply("HELLO");
+        require(hello.values.at("roi") == "32,0,0" && hello.values.at("format") == "Mono8",
+                "invalid live run setting blocked connection setup");
+        require(contents(child.audit).empty() && exists(folder + "/sentinel"),
+                "startup cleared files or moved the DAC");
+        // Invalid live values must still be refused by RUN before any files or hardware change.
+        child.send({"RUN", "--CHEMIN_ACQUIS", folder}); done(child, 1, 0);
+        require(contents(folder + "/sentinel") == "untouched" && files(folder).size() == 1 && contents(child.audit).empty(),
+                "invalid RUN cleared files or moved hardware");
+        auto command = run(folder);
+        command.insert(command.end(), {"--SCAN_PATTERN", "FERMAT", "--FSM_OVERLAP", "0", "--FSM_OVERLAP_MARGIN_US", "500"});
+        child.send(command); done(child, 0, 3);
+        child.send({"QUIT"}); child.reply("BYE"); child.expectEof();
+        require(child.wait() == 0, "overridden RUN poisoned the session"); child.cleaned();
+        outputs(folder, 3);
+    }
+    scratch.writeConfig(false);
 }
 
 static void randomPolarStops(Scratch& scratch, const string& identity)
@@ -566,10 +609,12 @@ static void startupCases(Scratch& scratch, const string& identity, const string&
         require(contents(child.audit) == "dac 0 0\n", "startup camera failure did not park DAC");
     }
     {
-        auto args = launch(identity); args.insert(args.end(), {"--FSM_OVERLAP", "2"});
-        Child child(scratch, "invalid-config", args);
+        // Path resolution is still required before opening the connection.
+        put(scratch.config + "/config_manip.txt", "DIM_ROI 32\n");
+        Child child(scratch, "invalid-config", launch(identity));
         child.reply("ERROR"); child.expectEof();
         require(child.wait() == 1 && contents(child.audit).empty(), "invalid startup config opened hardware");
+        require(remove((scratch.config + "/config_manip.txt").c_str()) == 0, "cannot remove ambiguous config");
     }
     {
         const string folder = scratch.directory("mono16");
@@ -645,6 +690,7 @@ int main()
         arv_shutdown();
         startupCases(scratch, identity, device_id);
         protocolRuns(scratch, identity, exposure_us);
+        deferredRunConfig(scratch, identity);
         randomPolarStops(scratch, identity);
         cliPromptStop(scratch);
         eofAfterRun(scratch, identity);
