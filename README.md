@@ -333,8 +333,11 @@ Configuration files and `--KEY value` overrides resolve as for the CLI. For exam
 Aravis device id; without it, exactly one discovered camera is required. Session
 mode never reads stdin for a camera choice. The program configures ROI, format
 and software triggering once, then sends `HELLO protocol=1 camera=... serial=...
-model=... vendor=... roi=1024,0,0 format=Mono8`, or `ERROR message=...` and exits
-nonzero on startup failure. Startup does not clear an acquisition folder or move
+model=... vendor=... roi=1024,0,0 format=Mono8 exposure_us=...`, or `ERROR message=...` and exits
+nonzero on startup failure. `exposure_us` reads the configured camera's current
+exposure in microseconds with 17 significant digits, as in the EXPOSURE reply;
+if this read fails, HELLO is still sent with `exposure_us=nan`.
+Startup does not clear an acquisition folder or move
 the mirror. Human-readable diagnostics go to stderr; stdout contains only protocol replies.
 The binary embeds `TDM_SESSION_PROTOCOL=1` for detection without launching hardware.
 

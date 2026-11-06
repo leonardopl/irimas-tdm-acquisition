@@ -77,7 +77,7 @@ struct Child {
     bool eof = false;
 
     Child(const Scratch& scratch, const string& name, const vector<string>& args, bool driver_exit = false,
-          const string& fail_image_path = "") {
+          const string& fail_image_path = "", const function<void()>& setup = {}) {
         audit = scratch.path + "/" + name + ".audit";
         log = scratch.path + "/" + name + ".log";
         int in[2], out[2];
@@ -106,13 +106,13 @@ struct Child {
                 test_hardware_event = [&](const string& event, double x, double y) {
                     ofstream file(audit.c_str(), ios::app);
                     file << event << " " << setprecision(17) << x << " " << y << "\n";
-                    // Inject only after clearing, at the centre move: keep testing image-write
-                    // failure independently of the new refusal to ignore failed removals.
+                    // Inject after clearing, at the centre move, so clearing cannot remove it.
                     if (!fail_image_path.empty() && !image_failure_injected && event == "dac") {
                         require(mkdir(fail_image_path.c_str(), 0700) == 0, "cannot inject image-write failure");
                         image_failure_injected = true;
                     }
                 };
+                if (setup) setup();
                 vector<string> words = {"tdm_acquisition"};
                 words.insert(words.end(), args.begin(), args.end());
                 vector<char*> argv;
@@ -252,7 +252,7 @@ static void done(Child& child, int status, int count)
     require((status == 0) == reply.values.at("error").empty(), "incorrect DONE error");
 }
 
-static void protocolRuns(Scratch& scratch, const string& identity)
+static void protocolRuns(Scratch& scratch, const string& identity, double expected_exposure_us)
 {
     const string first = scratch.directory("first run µ"), second = scratch.directory("second"), third = scratch.directory("third");
     put(first + "/sentinel", "keep until RUN");
@@ -260,6 +260,9 @@ static void protocolRuns(Scratch& scratch, const string& identity)
     const auto hello = child.reply("HELLO");
     require(hello.values.at("protocol") == "1" && hello.values.at("camera") == identity &&
             hello.values.at("roi") == "32,0,0" && hello.values.at("format") == "Mono8", "incorrect HELLO");
+    const double exposure_us = stod(hello.values.at("exposure_us"));
+    require(std::isfinite(exposure_us) && exposure_us > 0 && exposure_us == expected_exposure_us,
+            "HELLO exposure did not match the Fake camera");
     require(exists(first + "/sentinel") && contents(child.audit).empty(), "startup cleared files or moved DAC");
     child.send({"EXPOSURE", "1234.6"});
     auto exposure = child.reply("EXPOSURE");
@@ -313,6 +316,90 @@ static void idleEof(Scratch& scratch, const string& identity, bool incomplete)
     child.closeInput(); child.expectEof();
     require(child.wait() == 0, "idle EOF exit was nonzero"); child.cleaned();
     require(contents(child.audit) == "free_run 1 0\ndac 0 0\n", "idle EOF moved the DAC before parking");
+}
+
+static void randomPolarStops(Scratch& scratch, const string& identity)
+{
+    vector<ScanFrameCommand> commands;
+    string error;
+    int checks = 0;
+    require(!build_scan_frame_commands("RANDOM_POLAR", 64, Var2D{8, 8}, 3,
+                -1, 1, -1, 1, 1, 42, commands, error, [&]() { return ++checks == 8; }) &&
+            checks == 8 && commands.empty() && error.find("stopped") != string::npos,
+            "RANDOM_POLAR retry loop ignored the stop predicate");
+
+    const string folder = scratch.directory("random-polar-limit");
+    put(folder + "/sentinel", "untouched");
+    Child child(scratch, "random-polar-limit", launch(identity));
+    child.reply("HELLO");
+    auto command = run(folder, 64);
+    command.insert(command.end(), {"--SCAN_PATTERN", "RANDOM_POLAR", "--NXMAX", "4"});
+    const string before = contents(child.audit);
+    child.send(command);
+    const auto reply = child.reply("DONE");
+    require(reply.values.at("status") == "1" && reply.values.at("frames") == "0" &&
+            reply.values.at("error").find("RANDOM_POLAR exhausted its sampling attempt limit") != string::npos,
+            "unreachable RANDOM_POLAR count did not fail with a clear error");
+    require(contents(folder + "/sentinel") == "untouched" && files(folder).size() == 1 &&
+            contents(child.audit) == before, "RANDOM_POLAR failure cleared files or moved hardware");
+    child.send({"QUIT"}); child.reply("BYE"); child.expectEof();
+    require(child.wait() == 0, "RANDOM_POLAR failure poisoned the session"); child.cleaned();
+}
+
+static void cliPromptStop(Scratch& scratch)
+{
+    const string folder = scratch.directory("cli-prompt-stop");
+    auto args = run(folder); args.erase(args.begin());
+    Child child(scratch, "cli-prompt-stop", args, false, "", []() {
+        // Fake exposes one camera; exercise the multiple-camera prompt while the
+        // real CLI stack owns its open DAC, so its signal cleanup is also checked.
+        test_after_dac_open = []() { PromptCameraSelection(2); };
+    });
+    const auto deadline = chrono::steady_clock::now() + chrono::seconds(5);
+    string diagnostic;
+    while (diagnostic.find("Select camera [0-1]: ") == string::npos) {
+        require(chrono::steady_clock::now() < deadline, "CLI did not reach camera prompt");
+        // The prompt has no newline; read raw CLI diagnostics until it is visible.
+        pollfd fd = {child.output, POLLIN, 0};
+        const int ready = poll(&fd, 1, 50);
+        if (ready < 0 && errno == EINTR) continue;
+        require(ready >= 0, "cannot wait for camera prompt");
+        if (!ready) continue;
+        char bytes[4096];
+        const ssize_t count = read(child.output, bytes, sizeof(bytes));
+        require(count > 0, "CLI exited before camera prompt; " + contents(child.log));
+        diagnostic.append(bytes, static_cast<size_t>(count));
+    }
+    child.sendRaw(" 1"); // Partial formatted input must not bypass the stop checks.
+    require(kill(child.pid, SIGTERM) == 0, "cannot stop camera prompt");
+    while (!child.eof) { child.readMore(); child.lines.clear(); }
+    require(child.wait() == 1, "camera prompt stop did not return status 1");
+    require(contents(child.audit) == "dac 0 0\n", "camera prompt stop did not park the open DAC");
+}
+
+static void eofAfterRun(Scratch& scratch, const string& identity)
+{
+    const string folder = scratch.directory("eof-after-run"), ready = scratch.path + "/before-done";
+    Child child(scratch, "eof-after-run", launch(identity), false, "", [&]() {
+        test_before_done = [&]() {
+            put(ready, "ready");
+            const auto deadline = chrono::steady_clock::now() + chrono::seconds(5);
+            while (!StopRequested()) {
+                require(chrono::steady_clock::now() < deadline, "EOF did not arrive before DONE");
+                this_thread::sleep_for(chrono::milliseconds(1));
+            }
+        };
+    });
+    child.reply("HELLO"); child.send(run(folder));
+    const auto deadline = chrono::steady_clock::now() + chrono::seconds(5);
+    while (!exists(ready)) {
+        require(chrono::steady_clock::now() < deadline, "RUN did not reach DONE");
+        this_thread::sleep_for(chrono::milliseconds(1));
+    }
+    child.closeInput();
+    done(child, 0, 3); child.expectEof();
+    require(child.wait() == 0, "EOF after RUN changed the idle exit status");
+    child.cleaned(); outputs(folder, 3);
 }
 
 static void waitForFrame(const string& folder)
@@ -418,9 +505,21 @@ static void clearRefusals(Scratch& scratch, const string& identity)
                 reply.values.at("error").find(folder) != string::npos, "failed clear lacked DONE status 1/folder error");
         require(contents(child.audit) == before, "failed clear moved hardware");
     };
-    refused(blocked);
-    require(contents(blocked + "/nonempty/sentinel") == "untouched", "failed removal changed the blocked entry");
-    cliClearRefusal(scratch, blocked, "cli-failed-removal");
+    child.send(run(blocked)); done(child, 0, 3);
+    require(contents(blocked + "/nonempty/sentinel") == "untouched" && exists(blocked + "/i002.pgm") &&
+            contents(child.log).find("Warning: cannot remove " + blocked + "/nonempty") != string::npos,
+            "failed removal did not warn, keep the subdirectory and continue the RUN");
+    auto args = run(blocked); args.erase(args.begin());
+    {
+        Child cli(scratch, "cli-failed-removal", args);
+        while (!cli.eof) { cli.readMore(); cli.lines.clear(); }
+        require(cli.wait() == 0, "CLI did not continue after a failed removal"); cli.cleaned();
+        require(contents(blocked + "/nonempty/sentinel") == "untouched" && exists(blocked + "/i002.pgm") &&
+                contents(cli.log).find("Warning: cannot remove " + blocked + "/nonempty") != string::npos,
+                "CLI failed removal did not preserve the subdirectory and warn");
+    }
+    refused(scratch.path + "/missing-folder");
+    cliClearRefusal(scratch, scratch.path + "/missing-folder", "cli-missing-folder");
     if (geteuid() != 0) {
         const string unreadable = scratch.directory("unreadable");
         put(unreadable + "/sentinel", "untouched");
@@ -437,7 +536,7 @@ static void clearRefusals(Scratch& scratch, const string& identity)
     } else {
         cout << "SKIP assertion: root can read mode-0 folders; removal-failure checks still run.\n";
     }
-    // Both refusals leave the same camera/connection usable for a successful RUN and normal cleanup.
+    // A folder-open failure leaves the connection usable for a successful RUN and normal cleanup.
     child.send(run(valid)); done(child, 0, 3);
     child.send({"QUIT"}); child.reply("BYE"); child.expectEof();
     require(child.wait() == 0, "failed clear poisoned the session"); child.cleaned(); outputs(valid, 3);
@@ -537,13 +636,18 @@ int main()
         GError* error = NULL;
         ArvCamera* camera = arv_camera_new(device_id.c_str(), &error);
         require(camera && !error, "cannot open Fake camera");
+        const double exposure_us = arv_camera_get_exposure_time(camera, &error);
+        require(!error && std::isfinite(exposure_us) && exposure_us > 0, "cannot read Fake camera exposure");
         adapterFreshness(camera);
         require(!arv_device_get_feature(arv_camera_get_device(camera), "ExposureAuto") &&
                 !arv_device_get_feature(arv_camera_get_device(camera), "TimestampLatch"), "Fake capabilities changed; extend the fixture");
         g_object_unref(camera);
         arv_shutdown();
         startupCases(scratch, identity, device_id);
-        protocolRuns(scratch, identity);
+        protocolRuns(scratch, identity, exposure_us);
+        randomPolarStops(scratch, identity);
+        cliPromptStop(scratch);
+        eofAfterRun(scratch, identity);
         clearRefusals(scratch, identity);
         failedRun(scratch, identity);
         idleEof(scratch, identity, false);

@@ -195,11 +195,11 @@ int clear_acquisition(string rep, string chemin_config_manip, string chemin_reco
         if (filepath == chemin_config_manip || filepath == chemin_recon) continue;
         if (remove(filepath.c_str()) != 0) {
             const int code = errno;
-            fail("remove " + filepath, code);
-            break;
+            cerr << "Warning: cannot remove " << filepath << ": " << strerror(code) << endl;
         }
     }
-    if (closedir(folder) != 0 && error.empty()) fail("closedir", errno);
+    if (closedir(folder) != 0)
+        cerr << "Warning: cannot close acquisition directory " << rep << ": " << strerror(errno) << endl;
     return error.empty() ? 0 : 1;
 }
 

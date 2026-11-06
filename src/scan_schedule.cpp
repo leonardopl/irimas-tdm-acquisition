@@ -88,7 +88,8 @@ bool build_scan_frame_commands(
     double na_cond_lim,
     unsigned int random_seed,
     std::vector<ScanFrameCommand>& commands,
-    std::string& error)
+    std::string& error,
+    const std::function<bool()>& stop_requested)
 {
     commands.clear();
     error.clear();
@@ -134,7 +135,8 @@ bool build_scan_frame_commands(
         scan_uniform3D(rho, frame_count, generated);
     else if (pattern == "RANDOM_POLAR") {
         std::srand(random_seed);
-        scan_random_polar3D(rho, frame_count, generated, dimensions);
+        if (!scan_random_polar3D(rho, frame_count, generated, dimensions, error, stop_requested))
+            return false;
     } else if (pattern == "STAR")
         scan_star(rho, frame_count, 3, generated);
 

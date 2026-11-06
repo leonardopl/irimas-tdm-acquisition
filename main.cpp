@@ -51,6 +51,7 @@ using namespace std;
 #include <deque>
 #include <cerrno>
 #include <cstring>
+#include <cctype>
 
 // A volatile pointer keeps the complete capability object in the linked binary.
 static const char* volatile session_capability = acquisition_protocol::session_protocol_marker;
@@ -68,6 +69,7 @@ static void InputStopped() { stop_requests.fetch_or(2, std::memory_order_relaxed
 static Ljack* test_labjack = NULL;
 static std::function<void(const string&, double, double)> test_hardware_event;
 static std::function<void()> test_after_dac_open;
+static std::function<void()> test_before_done;
 #endif
 
 void RestoreFreeRun(ArvCamera* camera);
@@ -270,7 +272,7 @@ struct RunConfig {
                   get_val("VXMAX", manip_config_path, args),
                   get_val("VYMIN", manip_config_path, args),
                   get_val("VYMAX", manip_config_path, args),
-                  NAcondLim, random_seed, frame_commands, schedule_error);
+                  NAcondLim, random_seed, frame_commands, schedule_error, StopRequested);
         if (!commands_built)
         {
             error = "Invalid scan schedule: " + schedule_error;
@@ -545,6 +547,9 @@ public:
         fcntl(fd, F_SETFD, FD_CLOEXEC);
     }
     void send(const string& keyword, map<string, string> values = {}) {
+#ifdef TDM_ACQUISITION_TEST
+        if (keyword == "DONE" && test_before_done) test_before_done();
+#endif
         // External error strings may contain line breaks. Keep every reply exactly one protocol line.
         for (auto& pair : values)
             for (char& c : pair.second)
@@ -640,11 +645,16 @@ static int RunSession(const map<string, string>& launch_args, SessionReplies& re
         replies.send("ERROR", {{"message", e.what()}});
         return SignalStopRequested() ? 1 : -1;
     }
+    GError* exposure_error = NULL;
+    const double exposure_us = arv_camera_get_exposure_time(connection.camera, &exposure_error);
+    ostringstream exposure_value;
+    exposure_value << setprecision(17) << (exposure_error ? numeric_limits<double>::quiet_NaN() : exposure_us);
+    if (exposure_error) g_error_free(exposure_error);
     replies.send("HELLO", {{"protocol", "1"}, {"camera", connection.identity.identity},
                  {"serial", connection.identity.serial}, {"model", connection.identity.model},
                  {"vendor", connection.identity.vendor},
                  {"roi", to_string(connection.width) + "," + to_string(connection.x) + "," + to_string(connection.y)},
-                 {"format", connection.pixel_format}});
+                 {"format", connection.pixel_format}, {"exposure_us", exposure_value.str()}});
     string line;
     while (input.next(line)) {
         vector<string> words;
@@ -673,9 +683,10 @@ static int RunSession(const map<string, string>& launch_args, SessionReplies& re
             vector<char*> argv;
             for (string& word : words) argv.push_back(&word[0]);
             const RunResult result = runOnce(parse_args(static_cast<int>(argv.size()), argv.data()), connection, true);
+            const bool stopped_during_run = StopRequested();
             replies.send("DONE", {{"status", to_string(acquisition_protocol::doneStatus(result.status))},
                          {"frames", to_string(result.frames)}, {"error", result.error}});
-            if (StopRequested()) return 1; // EOF/signals during RUN keep the stop status.
+            if (stopped_during_run) return 1; // Later EOF belongs to the idle path.
             continue;
         }
         replies.send("ERROR", {{"message", "unknown command or invalid arguments: " + words[0]}});
@@ -714,6 +725,34 @@ int main(int argc, char* argv[])
 }
 
 // Select and connect to GenICam camera
+static unsigned int PromptCameraSelection(size_t camera_count)
+{
+    if (StopRequested()) throw runtime_error("acquisition stopped");
+    cout << "Select camera [0-" << camera_count - 1 << "]: " << flush;
+    string word;
+    while (!StopRequested()) {
+        pollfd fd = {STDIN_FILENO, POLLIN, 0};
+        const int ready = poll(&fd, 1, 50);
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready == 0) continue;
+        if (ready < 0) throw runtime_error("cannot read camera selection");
+        // Read one byte at a time: formatted cin extraction can block again after
+        // poll reports only whitespace or a partial selection from a pipe.
+        char c;
+        const ssize_t count = read(STDIN_FILENO, &c, 1);
+        if (count < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+        if (count < 0) throw runtime_error("cannot read camera selection");
+        if (count == 0) break;
+        if (isspace(static_cast<unsigned char>(c))) {
+            if (!word.empty()) break;
+        } else word += c;
+    }
+    if (StopRequested()) throw runtime_error("acquisition stopped");
+    unsigned int selected = 0;
+    istringstream(word) >> selected;
+    return selected < camera_count ? selected : 0;
+}
+
 ArvCamera* SelectAndConnectCamera(const string& wanted, bool session, CameraIdentity& identity)
 {
     vector<unsigned int> unique_devices;
@@ -779,10 +818,7 @@ ArvCamera* SelectAndConnectCamera(const string& wanted, bool session, CameraIden
     if (wanted.empty() && unique_devices.size() > 1)
     {
         if (session) throw runtime_error("CAMERA_ID is required when several cameras are found");
-        cout << "Select camera [0-" << unique_devices.size()-1 << "]: ";
-        cin >> selectedCamera;
-        if (selectedCamera >= unique_devices.size())
-            selectedCamera = 0;
+        selectedCamera = PromptCameraSelection(unique_devices.size());
     }
 
     unsigned int deviceIdx = unique_devices[selectedCamera];

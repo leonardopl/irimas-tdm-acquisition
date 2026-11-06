@@ -26,7 +26,8 @@ bool build_scan_frame_commands(
     double na_cond_lim,
     unsigned int random_seed,
     std::vector<ScanFrameCommand>& commands,
-    std::string& error);
+    std::string& error,
+    const std::function<bool()>& stop_requested = {});
 
 // A scan table: row 0 is the centre (scan_command_index -1), row k has scan_command_index k - 1. An FSM schedule's table
 // (`fsm_schedule`) has scan_command_index k in row k (the schedule's row).

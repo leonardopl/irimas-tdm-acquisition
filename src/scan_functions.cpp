@@ -158,15 +158,28 @@ void scan_random_cartesian(double Vmax, int nbHolo, std::vector<float2D> &Vout_t
 }
 
 // Random polar coordinates on a sphere, projected to 2D voltages
-void scan_random_polar3D(double Vmax, int nbHolo, std::vector<float2D> &Vout_table, Var2D dim)
+bool scan_random_polar3D(double Vmax, int nbHolo, std::vector<float2D> &Vout_table, Var2D dim,
+                         std::string& error, const std::function<bool()>& stop_requested)
 {
     double const nbPixVolt=(dim.x/(2*Vmax));
     double nbAleaPhi=0, nbAleaTheta=0;
     vector<int> center(dim.x*dim.y);
     int numHolo=0;
+    // The projected sphere cannot reach every grid bin. Bound rejection sampling even
+    // when the requested count fits the rectangular grid but not the reachable disk.
+    const unsigned long long max_attempts = std::max(10000ULL, 1000ULL * nbHolo);
+    unsigned long long attempts = 0;
     // Generate unique random voltages and place on integer grid
     while(numHolo<nbHolo)
     {
+        if (stop_requested && stop_requested()) {
+            error = "RANDOM_POLAR generation stopped";
+            return false;
+        }
+        if (attempts++ >= max_attempts) {
+            error = "RANDOM_POLAR exhausted its sampling attempt limit; reduce NB_HOLO or increase NXMAX";
+            return false;
+        }
         nbAleaPhi=acos(2.0*(rand()/(double)RAND_MAX)-1.0); // phi in [0, pi]
         nbAleaTheta=rand()/(double)RAND_MAX*2*M_PI;         // theta in [0, 2pi]
         Vout_table[numHolo].x = Vmax*cos(nbAleaTheta)*sin(nbAleaPhi);
@@ -185,6 +198,10 @@ void scan_random_polar3D(double Vmax, int nbHolo, std::vector<float2D> &Vout_tab
     // Reorder to minimize mirror jumps (zigzag raster)
     numHolo=0;
     for( int y=0; y<dim.y; y=y+1){
+        if (stop_requested && stop_requested()) {
+            error = "RANDOM_POLAR generation stopped";
+            return false;
+        }
         if(y%2==0) // even rows: increasing x
         {
             for( int x=0; x<dim.x; x++){
@@ -206,6 +223,7 @@ void scan_random_polar3D(double Vmax, int nbHolo, std::vector<float2D> &Vout_tab
             }
         }
     }
+    return true;
 }
 
 // Archimedean spiral: single-point update
