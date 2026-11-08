@@ -294,6 +294,19 @@ static void argumentSafety(Scratch& scratch)
             require(output.empty(), "one-shot usage error wrote to stdout: " + output);
         untouched(child);
     }
+    // B278: a one-shot launch names its output folder; gui_tomo.conf's default (live: /ramdisk) is never cleared.
+    const vector<vector<string>> no_folder = {{}, {"--NB_HOLO", "3"}, {"--CHEMIN_ACQUIS", ""}};
+    for (const auto& words : no_folder) {
+        Child child(scratch, "no-folder-" + to_string(index++), words);
+        const string output = stdoutText(child);
+        require(child.wait() == 2, "one-shot launch without --CHEMIN_ACQUIS did not exit 2");
+        const string error = contents(child.log);
+        require(error.find("tdm_acquisition: ") == 0 && error.find("--CHEMIN_ACQUIS") != string::npos &&
+                error.find("--help") != string::npos && count(error.begin(), error.end(), '\n') == 1,
+                "missing-folder error did not name --CHEMIN_ACQUIS and --help on one line: " + error);
+        require(output.empty(), "missing-folder usage error wrote to stdout: " + output);
+        untouched(child);
+    }
 }
 
 // Every entry of the folder must be an expected output (a regular file) or one of the entries the test seeded there.
@@ -851,6 +864,9 @@ static void cliRun(Scratch& scratch, bool no_roi)
     }
     require(child.wait() == 0, "CLI acquisition failed: " + diagnostic + contents(child.log)); child.cleaned();
     outputs(folder, 3, no_roi ? 512 : 32);
+    // The named folder is the only output: gui_tomo.conf's CHEMIN_ACQUIS keeps argumentSafety's sentinel alone.
+    require(files(scratch.path + "/default") == set<string>{"i777.pgm"} &&
+            contents(scratch.path + "/default/i777.pgm") == "default untouched", "CLI run touched gui_tomo.conf's folder");
     if (no_roi) require(diagnostic.find("keeping camera's current ROI") != string::npos, "ROI-free behavior changed");
     scratch.writeConfig(false);
 }

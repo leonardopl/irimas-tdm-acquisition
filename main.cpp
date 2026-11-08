@@ -712,11 +712,13 @@ static int RunSession(const map<string, string>& launch_args, SessionReplies& re
 static void PrintUsage()
 {
     cout << "Usage:\n"
-         << "  tdm_acquisition [--KEY VALUE ...]   one acquisition\n"
+         << "  tdm_acquisition --CHEMIN_ACQUIS DIR [--KEY VALUE ...]   one acquisition into DIR\n"
          << "  tdm_acquisition --SESSION 1 [connection keys]   session mode; RUN lines on stdin\n"
          << "  tdm_acquisition --help | -h\n\n"
+         << "A one-shot launch without a non-empty --CHEMIN_ACQUIS is a usage error (exit 2).\n"
          << "Warning: one acquisition uses the camera, the FSM DAC and the config named by\n"
-         << "~/.config/gui_tomo.conf, and writes into CHEMIN_ACQUIS (default from gui_tomo.conf).\n"
+         << "~/.config/gui_tomo.conf, and writes into CHEMIN_ACQUIS (a session RUN without\n"
+         << "--CHEMIN_ACQUIS writes into the one in gui_tomo.conf).\n"
          << "Before a run, only regular files or symlinks named i + 3 or more ASCII digits + .pgm,\n"
          << "Intensite_ref.pgm, fsm_frame_commands.csv[.tmp], fsm_schedule.csv[.tmp],\n"
          << "frame_timing.csv and frame_timing_summary.json are deleted. Other entries are kept\n"
@@ -745,6 +747,14 @@ int main(int argc, char* argv[])
         // A session client reads only stdout replies: a startup failure is an ERROR reply there too.
         if (acquisition_protocol::sessionRequested(words))
             cout << acquisition_protocol::formatReply("ERROR", {{"message", error}}) << '\n' << flush;
+        return 2;
+    }
+    // B278: a one-shot launch names its output folder; gui_tomo.conf's CHEMIN_ACQUIS (live: /ramdisk) is never cleared
+    // by a bare launch. Session launches take it from each RUN line.
+    const auto output_folder = args.find("CHEMIN_ACQUIS");
+    if (!args.count("SESSION") && (output_folder == args.end() || output_folder->second.empty())) {
+        cerr << "tdm_acquisition: a one-shot run needs an output folder: give --CHEMIN_ACQUIS DIR (--help lists the keys)"
+             << endl;
         return 2;
     }
     (void)session_capability;

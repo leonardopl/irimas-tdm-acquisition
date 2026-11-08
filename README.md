@@ -56,7 +56,7 @@ Paths are read from `~/.config/gui_tomo.conf`:
 | Key | Description |
 |-----|-------------|
 | CHEMIN_CONFIG | Configuration directory |
-| CHEMIN_ACQUIS | Hologram output directory |
+| CHEMIN_ACQUIS | Hologram output directory for a session `RUN` without `--CHEMIN_ACQUIS` (the GUI always sends it); a one-shot launch must give `--CHEMIN_ACQUIS` |
 | CHEMIN_RESULT | Results directory |
 
 Within `CHEMIN_CONFIG`, acquisition parameters are read from `acquisition.conf`,
@@ -315,13 +315,17 @@ it never processes the run as a tomography scan.
 
 ```bash
 ./bin/tdm_acquisition --help  # or -h; prints all keys without reading config or using hardware
-./bin/tdm_acquisition
+./bin/tdm_acquisition --CHEMIN_ACQUIS /path/to/folder [--KEY VALUE ...]
 # or
-./run.sh
+./run.sh --CHEMIN_ACQUIS /path/to/folder [--KEY VALUE ...]
 ```
 
 One acquisition uses the camera, the FSM DAC and the config named by
-`~/.config/gui_tomo.conf`, and writes to `CHEMIN_ACQUIS` (default from that file).
+`~/.config/gui_tomo.conf`, and writes to the folder given with `--CHEMIN_ACQUIS`.
+A one-shot launch without a non-empty `--CHEMIN_ACQUIS` (a bare `./bin/tdm_acquisition`
+or `./run.sh` included) is a usage error: it exits 2 before reading any config or using
+hardware. It no longer falls back to the `CHEMIN_ACQUIS` of `gui_tomo.conf`, so a bare
+launch cannot clear that folder (B278). Session `RUN` lines still fall back to it.
 Overrides must be known `--KEY VALUE` pairs, once per key; `--KEY=VALUE`, bare
 words, unknown keys, duplicate keys and missing values are usage errors.
 Values are kept verbatim, including blanks, `#`, negative numbers and empty strings;
