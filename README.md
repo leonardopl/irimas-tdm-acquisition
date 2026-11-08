@@ -348,6 +348,11 @@ earlier acquisition file
 also refuses the run before hardware use; cleanup may already have removed other
 acquisition files.
 
+Every output is created exclusively through the run folder's open directory
+handle. An output name that appears in the folder during the run fails the run
+with an error naming the file; nothing is overwritten and symlinks are never
+followed. The session remains usable for another `RUN`.
+
 ## Session mode
 
 `--SESSION 1` opens one camera and one LabJack connection for multiple acquisitions.

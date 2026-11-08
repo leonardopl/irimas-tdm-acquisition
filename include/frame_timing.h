@@ -13,6 +13,7 @@
 #include <locale>
 #include <sstream>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 // The version of check_frame_timing's verdict rules, written into frame_timing_summary.json as "rules_version" (a summary
@@ -332,14 +333,8 @@ inline std::string frame_timing_json_string(const std::string& value)
     return text.str();
 }
 
-inline bool write_frame_timing_summary(const std::string& path, const FrameTimingSummary& summary,
-                                      std::string& error)
+inline std::string frame_timing_summary_json(const FrameTimingSummary& summary)
 {
-    std::FILE* file = std::fopen(path.c_str(), "w");
-    if (!file) {
-        error = path + ": " + std::strerror(errno);
-        return false;
-    }
     std::ostringstream text;
     text << "{\n  \"rules_version\": " << frame_timing_rules_version
          << ",\n  \"mode\": \"" << (summary.overlap ? "overlap" : "sequential") << "\",\n"
@@ -384,39 +379,35 @@ inline bool write_frame_timing_summary(const std::string& path, const FrameTimin
          << ",\n  \"negative_slack_images\": " << frame_timing_indices_json(summary.negative_slack_images)
          << ",\n  \"unsettled_images\": " << frame_timing_indices_json(summary.unsettled_images)
          << ",\n  \"dac_retry_images\": " << frame_timing_indices_json(summary.dac_retry_images) << "\n}\n";
-    const bool ok = std::fputs(text.str().c_str(), file) >= 0;
-    if (std::fclose(file) != 0 || !ok) {
-        error = path + ": write failed";
-        return false;
-    }
-    return true;
+    return text.str();
 }
 
-inline bool write_frame_timing_csv(const std::string& path, const std::vector<FrameTiming>& rows, int settle_ms,
-                                   std::string& error)
+inline std::string frame_timing_csv(const std::vector<FrameTiming>& rows, int settle_ms)
 {
-    std::FILE* file = std::fopen(path.c_str(), "w");
-    if (!file) {
-        error = path + ": " + std::strerror(errno);
-        return false;
-    }
-    std::fprintf(file, "schema_version,image_index,settle_ms,dac_start_ms,dac_done_ms,trigger_start_ms,"
+    std::string text = "schema_version,image_index,settle_ms,dac_start_ms,dac_done_ms,trigger_start_ms,"
                        "trigger_done_ms,buffer_ms,written_ms,frame_id,camera_timestamp_ns,system_timestamp_ns,"
-                       "exposure_start_host_ms,next_dac_slack_ms\n");
-    for (const FrameTiming& row : rows)
-        std::fprintf(file, "2,%zu,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%s,%s\n", row.image_index,
+                       "exposure_start_host_ms,next_dac_slack_ms\n";
+    // Six %.3f doubles can each need over 300 digits; grow for any unusually large row.
+    std::vector<char> buffer(512);
+    for (const FrameTiming& row : rows) {
+        for (;;) {
+            const int count = std::snprintf(buffer.data(), buffer.size(),
+                     "2,%zu,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%s,%s\n", row.image_index,
                      row.settle_ms >= 0 ? row.settle_ms : settle_ms,
                      row.dac_start_ms, row.dac_done_ms, row.trigger_start_ms, row.trigger_done_ms, row.buffer_ms,
                      row.written_ms, (unsigned long long)row.frame_id, (unsigned long long)row.camera_timestamp_ns,
                      (unsigned long long)row.system_timestamp_ns,
                      frame_timing_number(row.exposure_start_host_ms, "").c_str(),
                      frame_timing_number(row.next_dac_slack_ms, "").c_str());
-    const bool ok = !std::ferror(file);
-    if (std::fclose(file) != 0 || !ok) {
-        error = path + ": write failed";
-        return false;
+            if (count < 0) throw std::runtime_error("cannot format frame timing row");
+            if (static_cast<std::size_t>(count) < buffer.size()) {
+                text.append(buffer.data(), static_cast<std::size_t>(count));
+                break;
+            }
+            buffer.resize(static_cast<std::size_t>(count) + 1);
+        }
     }
-    return true;
+    return text;
 }
 
 // One frame_timing.csv field as a number, in the C locale; the whole field must be the number.
@@ -436,7 +427,7 @@ inline bool frame_timing_field(std::istringstream& input, const std::string& tex
     return !text.empty() && text[0] >= '0' && text[0] <= '9' && (input >> value) && !(input >> rest);
 }
 
-// frame_timing.csv (schema 2) as write_frame_timing_csv writes it: one row per commanded frame, image_index 0, 1, ...
+// frame_timing.csv (schema 2) as frame_timing_csv builds it: one row per commanded frame, image_index 0, 1, ...
 // in order; the derived columns (exposure_start_host_ms, next_dac_slack_ms) as written, NaN when empty. settle_ms is the
 // file's settle column when it is the same in every row (the rows' own settle_ms then stay -1); when it differs (an FSM
 // schedule) settle_ms is -1 and every row carries its own. dac_retried / dac_failed are not in the file and stay false.

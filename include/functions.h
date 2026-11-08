@@ -15,6 +15,7 @@
 using namespace std;
 
 #include "projet.h"
+#include "run_folder.h"
 
 // If neither name exists, keep the legacy path and its existing reader diagnostics.
 bool resolve_config_path(const string& config_dir, const string& canonical_name,
@@ -46,6 +47,7 @@ bool is_acquisition_output(const string& name);
 // Read the whole listing before deleting only regular files/symlinks with own-output names.
 // Archived frames and own-output names that are not regular files/symlinks refuse without deletions.
 // Other entries are returned sorted (directories end in '/').
-// Returns 1 on open/read/close/inspect/unlink failure, naming the folder/entry. Unlink may partially clear.
-int clear_acquisition(const string& rep, vector<string>& left, string& error);
+// Uses the caller's open directory. Returns 1 on list/read/close/inspect/unlink failure, naming the folder/entry.
+// Unlink may partially clear.
+int clear_acquisition(const RunFolder& run_folder, vector<string>& left, string& error);
 #endif

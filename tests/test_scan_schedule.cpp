@@ -312,9 +312,9 @@ void check_fsm_schedule()
     // The table keeps the frame-command schema; the scan contract and the schedule's are told apart.
     assert(parse(good, rows, error));
     assert(build_fsm_schedule_frame_commands(rows, kVxmin, kVxmax, kVymin, kVymax, kNaCondLim, commands, error));
-    assert(!write_scan_frame_commands_csv(path, commands, error));
-    assert(write_scan_frame_commands_csv(path, commands, error, true));
-    std::ifstream table(path.c_str());
+    assert(!scan_frame_commands_csv(commands, text, error));
+    assert(scan_frame_commands_csv(commands, text, error, true));
+    std::istringstream table(text);
     std::string line;
     std::vector<std::string> lines;
     while (std::getline(table, line))
@@ -326,16 +326,8 @@ void check_fsm_schedule()
     std::vector<ScanFrameCommand> scan;
     assert(build_scan_frame_commands("STAR", 4, Var2D{256, 256}, 3, kVxmin, kVxmax, kVymin, kVymax, kNaCondLim, 1,
                                      scan, error));
-    assert(!write_scan_frame_commands_csv(path, scan, error, true));
-    std::remove(path.c_str());
-
-    // The copy beside the frames is the text as read, byte for byte.
-    assert(write_fsm_schedule_copy(path, good, error));
-    std::ifstream copy(path.c_str(), std::ios::binary);
-    const std::string copied((std::istreambuf_iterator<char>(copy)), std::istreambuf_iterator<char>());
-    assert(copied == good);
-    std::remove(path.c_str());
-    assert(!write_fsm_schedule_copy("/nonexistent-dir/fsm_schedule.csv", good, error) && !error.empty());
+    assert(!scan_frame_commands_csv(scan, text, error, true));
+    // Verbatim copy and filesystem failure checks moved to test_session and test_run_folder.
 }
 
 } // namespace
@@ -347,9 +339,17 @@ int main(int argc, char* argv[])
             std::fprintf(stderr, "Usage: %s [--write-fermat-fixture PATH]\n", argv[0]);
             return 1;
         }
-        std::string error;
-        if (!write_scan_frame_commands_csv(argv[2], fermat_rig_commands(), error)) {
+        std::string error, text;
+        if (!scan_frame_commands_csv(fermat_rig_commands(), text, error)) {
             std::fprintf(stderr, "%s\n", error.c_str());
+            return 1;
+        }
+        // Repository fixture generation intentionally replaces the requested path.
+        std::ofstream out(argv[2], std::ios::binary | std::ios::trunc);
+        out << text;
+        out.close();
+        if (!out.good()) {
+            std::fprintf(stderr, "Cannot write fixture %s\n", argv[2]);
             return 1;
         }
         return 0;
@@ -423,17 +423,16 @@ int main(int argc, char* argv[])
     settling_commands[2].command_vy_v = 0.4;
     assert(default_fsm_settle_ms(std::vector<ScanFrameCommand>()) == 100);
 
-    const std::string path = "/tmp/irimas_fsm_frame_commands_test.csv";
-    assert(write_scan_frame_commands_csv(path, commands, error));
-    std::ifstream input(path.c_str());
+    std::string text;
+    assert(scan_frame_commands_csv(commands, text, error));
+    std::istringstream input(text);
     std::string line;
     int lines = 0;
     while (std::getline(input, line))
         ++lines;
     assert(lines == 41);
-    std::remove(path.c_str());
 
-    // Per-frame timing CSV (B192): header, one row per frame, a failed frame's -1 fields, an unwritable path.
+    // Per-frame timing CSV (B192): header, one row per frame and a failed frame's -1 fields.
     std::vector<FrameTiming> timing(2);
     timing[0].image_index = 0;
     timing[0].dac_done_ms = 1.25;
@@ -442,9 +441,7 @@ int main(int argc, char* argv[])
     timing[0].frame_id = 7;
     timing[0].camera_timestamp_ns = 123456789012ULL;
     timing[1].image_index = 1;
-    const std::string timing_path = "/tmp/irimas_frame_timing_test.csv";
-    assert(write_frame_timing_csv(timing_path, timing, 5, error));
-    std::ifstream timing_input(timing_path.c_str());
+    std::istringstream timing_input(frame_timing_csv(timing, 5));
     std::vector<std::string> timing_lines;
     while (std::getline(timing_input, line))
         timing_lines.push_back(line);
@@ -454,7 +451,6 @@ int main(int argc, char* argv[])
                               "exposure_start_host_ms,next_dac_slack_ms");
     assert(timing_lines[1] == "2,0,5,0.000,1.250,0.000,0.000,17.500,20.000,7,123456789012,0,,");
     assert(timing_lines[2] == "2,1,5,0.000,0.000,0.000,0.000,-1.000,-1.000,0,0,0,,");
-    std::remove(timing_path.c_str());
-    assert(!write_frame_timing_csv("/nonexistent-dir/frame_timing.csv", timing, 5, error) && !error.empty());
+    // Filesystem write/refusal checks now live in test_run_folder.
     return 0;
 }

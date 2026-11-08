@@ -631,6 +631,70 @@ static void failedRun(Scratch& scratch, const string& identity)
     require(child.wait() == 0, "failed RUN poisoned the session"); child.cleaned(); outputs(valid, 3);
 }
 
+// Inject after cleanup, using an arm file outside the run folder between RUNs.
+static void takenOutputs(Scratch& scratch, const string& identity)
+{
+    const string folder = scratch.directory("taken-outputs"), arm = scratch.path + "/arm-output";
+    const vector<string> names = {"i001.pgm", "frame_timing.csv", "fsm_frame_commands.csv",
+                                  "Intensite_ref.pgm", "frame_timing_summary.json", "fsm_schedule.csv"};
+    const string schedule = scratch.path + "/taken-schedule.csv";
+    put(schedule, "vx_v,vy_v,settle_ms,label\n0,0,0,centre\n0.1,0.1,0,step\n");
+    Child child(scratch, "taken-outputs", launch(identity), false, "", [&]() {
+        const auto audit_event = test_hardware_event;
+        test_hardware_event = [&, audit_event](const string& event, double x, double y) {
+            audit_event(event, x, y);
+            if (event != "dac" || !exists(arm)) return;
+            istringstream names(contents(arm));
+            require(unlink(arm.c_str()) == 0, "cannot disarm injection");
+            string name;
+            while (getline(names, name))
+                require(symlink((scratch.path + "/outside-" + name).c_str(), (folder + "/" + name).c_str()) == 0,
+                        "cannot plant output symlink");
+        };
+    });
+    child.reply("HELLO");
+    for (const string& name : names) {
+        const string outside = scratch.path + "/outside-" + name;
+        put(outside, "outside content " + name);
+        put(arm, name);
+        auto command = run(folder);
+        if (name == "Intensite_ref.pgm") command.insert(command.end(), {"--AMPLI_REF", "1"});
+        if (name == "fsm_schedule.csv") command.insert(command.end(), {"--FSM_SCHEDULE", schedule});
+        child.send(command);
+        const auto reply = child.reply("DONE");
+        const bool before_camera = name == "fsm_frame_commands.csv" || name == "fsm_schedule.csv";
+        require(reply.values.at("status") == (before_camera ? "1" : "255") &&
+                reply.values.at("error").find(folder + "/" + name) != string::npos &&
+                reply.values.at("error").find("nothing was overwritten") != string::npos,
+                "taken output lacked its failure/name: " + contents(child.log));
+        require(contents(outside) == "outside content " + name, "output write followed symlink " + name);
+        struct stat info;
+        require(lstat((folder + "/" + name).c_str(), &info) == 0 && S_ISLNK(info.st_mode),
+                "output write replaced symlink " + name);
+        child.send(run(folder)); done(child, 0, 3);
+        outputs(folder, 3);
+    }
+    // Keep the first scan error and still warn about timing collisions after a failed scan.
+    put(arm, "i001.pgm\nframe_timing.csv\nframe_timing_summary.json");
+    child.send(run(folder));
+    const auto reply = child.reply("DONE");
+    require(reply.values.at("status") == "255" && reply.values.at("frames") == "1" &&
+            reply.values.at("error").find("i001.pgm") != string::npos,
+            "timing collision replaced the first scan error");
+    const string log = contents(child.log);
+    for (const string& name : {"frame_timing.csv", "frame_timing_summary.json"}) {
+        const string label = name == "frame_timing.csv" ? "frame timing" : "frame timing summary";
+        require(log.find("Warning: cannot write the " + label + ": refusing to write \"" + folder + "/" + name) != string::npos,
+                "timing collision after scan failure did not warn");
+    }
+    for (const string& name : names)
+        require(contents(scratch.path + "/outside-" + name) == "outside content " + name,
+                "failed scan changed outside content " + name);
+    child.send(run(folder)); done(child, 0, 3); outputs(folder, 3);
+    child.send({"QUIT"}); child.reply("BYE"); child.expectEof();
+    require(child.wait() == 0, "taken output poisoned session"); child.cleaned();
+}
+
 static void cliClearRefusal(Scratch& scratch, const string& folder, const string& name)
 {
     auto args = run(folder); args.erase(args.begin());
@@ -852,17 +916,106 @@ static void startupCases(Scratch& scratch, const string& identity, const string&
 
 static void adapterFreshness(ArvCamera* camera)
 {
-    const string path = "unused";
+    const RunFolder folder(".");
     const vector<ScanFrameCommand> commands;
     FrameLoopOptions options;
-    AcquisitionFrameIO first(camera, NULL, NULL, path, commands, options, 1, CV_8UC1);
+    AcquisitionFrameIO first(camera, NULL, NULL, folder, commands, options, 1, CV_8UC1);
     first.first_latch.valid = true; first.first_latch.camera_ns = 12345;
     first.frames = 7; first.doodle_index = 4;
     this_thread::sleep_for(chrono::milliseconds(2));
-    AcquisitionFrameIO second(camera, NULL, NULL, path, commands, options, 1, CV_8UC1);
+    AcquisitionFrameIO second(camera, NULL, NULL, folder, commands, options, 1, CV_8UC1);
     require(second.origin > first.origin && second.now_ms() < first.now_ms(), "run adapter reused the clock origin");
     require(!second.first_latch.valid && second.first_latch.camera_ns == 0 && second.frames == 0 && second.doodle_index == 0,
             "run adapter retained latch/progress state");
+}
+
+static void timingOutputFailures(Scratch& scratch, ArvCamera* camera)
+{
+    const vector<ScanFrameCommand> commands;
+    FrameLoopOptions options;
+    options.exposure_us = 1000;
+    vector<FrameTiming> rows(3);
+    for (size_t k = 0; k < rows.size(); ++k) {
+        FrameTiming& row = rows[k];
+        row.image_index = k;
+        row.frame_id = k + 1;
+        row.camera_timestamp_ns = 1000000000ULL + k * 10000000ULL;
+        row.dac_start_ms = k * 10;
+        row.dac_done_ms = row.dac_start_ms + 0.5;
+        row.trigger_start_ms = row.dac_start_ms + 1;
+        row.trigger_done_ms = row.dac_start_ms + 1.1;
+        row.buffer_ms = row.dac_start_ms + 3;
+        row.written_ms = row.dac_start_ms + 4;
+    }
+    require(!check_frame_timing(rows, options).suspect, "timing output fixture has invalid rows");
+    auto finish = [&](AcquisitionFrameIO& io, bool success) {
+        const string log = scratch.path + "/timing-finish.log";
+        {
+            cerr.flush(); fflush(stderr);
+            const int saved = dup(STDERR_FILENO);
+            require(saved >= 0, "cannot save stderr for timing test");
+            struct RestoreStderr {
+                int fd;
+                ~RestoreStderr() { cerr.flush(); fflush(stderr); dup2(fd, STDERR_FILENO); close(fd); }
+            } restore{saved};
+            const int output = open(log.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            require(output >= 0, "cannot open timing test log");
+            const int redirected = dup2(output, STDERR_FILENO);
+            close(output);
+            require(redirected >= 0, "cannot redirect timing test stderr");
+            io.finish(rows, success, options);
+        }
+        return contents(log);
+    };
+    {
+        const string path = scratch.directory("timing-read-only");
+        const RunFolder folder(path);
+        require(folder.fd() >= 0, "cannot open read-only timing test folder");
+        struct RestoreMode {
+            const string& path;
+            ~RestoreMode() { chmod(path.c_str(), 0700); }
+        } restore{path};
+        require(chmod(path.c_str(), 0500) == 0, "cannot make timing folder read-only");
+        const int probe = openat(folder.fd(), "permission-probe", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+        if (probe >= 0) {
+            close(probe);
+            require(unlinkat(folder.fd(), "permission-probe", 0) == 0, "cannot remove timing permission probe");
+            cout << "SKIP assertion: process can write to a 0500 directory (root/permission override); timing I/O case skipped.\n";
+        } else {
+            require(errno == EACCES, "timing permission probe failed for a reason other than EACCES");
+            AcquisitionFrameIO io(camera, NULL, NULL, folder, commands, options, 1, CV_8UC1);
+            const string log = finish(io, true);
+            require(io.output_error.empty(), "timing I/O warning failed an otherwise completed scan");
+            for (const string& label : {"frame timing", "frame timing summary"})
+                require(log.find("Warning: cannot write the " + label + ": ") != string::npos,
+                        "timing I/O error omitted warning for " + label);
+            require(log.find(strerror(EACCES)) != string::npos && files(path).empty(),
+                    "read-only timing failure did not report EACCES or created output files");
+        }
+    }
+    {
+        const string path = scratch.directory("timing-taken"), outside = scratch.path + "/timing-outside";
+        put(outside, "outside timing sentinel");
+        require(symlink(outside.c_str(), (path + "/frame_timing.csv").c_str()) == 0, "cannot plant timing symlink");
+        const RunFolder folder(path);
+        require(folder.fd() >= 0, "cannot open taken timing test folder");
+        AcquisitionFrameIO io(camera, NULL, NULL, folder, commands, options, 1, CV_8UC1);
+        finish(io, true);
+        require(io.output_error.find(path + "/frame_timing.csv") != string::npos &&
+                io.output_error.find("nothing was overwritten") != string::npos, "taken timing name did not fail the scan");
+        require(contents(outside) == "outside timing sentinel", "timing write changed outside target");
+        require(files(path) == set<string>{"frame_timing.csv", "frame_timing_summary.json"} &&
+                contents(path + "/frame_timing_summary.json").find("\"frames\": 3") != string::npos,
+                "taken CSV prevented timing summary from being written");
+    }
+    {
+        const RunFolder folder(scratch.directory("timing-incomplete"));
+        require(folder.fd() >= 0, "cannot open incomplete timing test folder");
+        AcquisitionFrameIO io(camera, NULL, NULL, folder, commands, options, 1, CV_8UC1);
+        require(io.output_error.empty(), "fresh timing adapter retained an error");
+        finish(io, false);
+        require(io.output_error == "hologram acquisition did not complete", "failed scan lost its default error");
+    }
 }
 
 static void cliRun(Scratch& scratch, bool no_roi)
@@ -909,6 +1062,7 @@ int main()
         const double exposure_us = arv_camera_get_exposure_time(camera, &error);
         require(!error && std::isfinite(exposure_us) && exposure_us > 0, "cannot read Fake camera exposure");
         adapterFreshness(camera);
+        timingOutputFailures(scratch, camera);
         require(!arv_device_get_feature(arv_camera_get_device(camera), "ExposureAuto") &&
                 !arv_device_get_feature(arv_camera_get_device(camera), "TimestampLatch"), "Fake capabilities changed; extend the fixture");
         g_object_unref(camera);
@@ -922,6 +1076,7 @@ int main()
         clearRefusals(scratch, identity);
         cleanupPreservation(scratch, identity);
         failedRun(scratch, identity);
+        takenOutputs(scratch, identity);
         idleEof(scratch, identity, false);
         idleEof(scratch, identity, true);
         activeStop(scratch, identity, 0);

@@ -173,35 +173,25 @@ bool indexed_frame(const string& name, const string& extension)
 
 bool is_acquisition_output(const string& name)
 {
-    // main.cpp: AcquisitionFrameIO writes i%03zu.pgm and both frame_timing files;
-    // AcquireIntensityRef writes Intensite_ref.pgm. src/scan_schedule.cpp writes the
-    // two fsm CSVs via their .tmp files before renaming them.
+    // main.cpp writes every output through RunFolder: i%03zu.pgm, Intensite_ref.pgm,
+    // both frame_timing files and the two fsm CSVs (published via their .tmp files).
     return indexed_frame(name, ".pgm") || name == "Intensite_ref.pgm" ||
         name == "fsm_frame_commands.csv" || name == "fsm_frame_commands.csv.tmp" ||
         name == "fsm_schedule.csv" || name == "fsm_schedule.csv.tmp" ||
         name == "frame_timing.csv" || name == "frame_timing_summary.json";
 }
 
-int clear_acquisition(const string& rep, vector<string>& left, string& error)
+int clear_acquisition(const RunFolder& run_folder, vector<string>& left, string& error)
 {
+    const string& rep = run_folder.path();
     left.clear();
     error.clear();
     auto fail = [&](const string& operation, int code) {
         error = "Cannot clear acquisition directory " + acquisition_protocol::diagnosticWord(rep) +
                 ": " + operation + ": " + strerror(code);
     };
-    // Every step goes through this one open directory: a retargeted symlink or a renamed folder cannot redirect the
-    // deletions to a folder whose listing was not checked.
-    struct Descriptor {
-        int fd;
-        ~Descriptor() { if (fd >= 0) close(fd); }
-    } dir{open(rep.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC)};
-    if (dir.fd < 0) {
-        fail("opendir", errno);
-        return 1;
-    }
-    // fdopendir owns the duplicate; closedir closes it and leaves dir.fd open.
-    const int listing = fcntl(dir.fd, F_DUPFD_CLOEXEC, 0);
+    // Cleanup and all subsequent writes use the same directory, held open by the caller.
+    const int listing = fcntl(run_folder.fd(), F_DUPFD_CLOEXEC, 0);
     if (listing < 0) {
         fail("dup", errno);
         return 1;
@@ -239,7 +229,7 @@ int clear_acquisition(const string& rep, vector<string>& left, string& error)
     vector<string> outputs;
     for (const string& name : names) {
         struct stat info;
-        if (fstatat(dir.fd, name.c_str(), &info, AT_SYMLINK_NOFOLLOW) != 0) {
+        if (fstatat(run_folder.fd(), name.c_str(), &info, AT_SYMLINK_NOFOLLOW) != 0) {
             fail("lstat " + acquisition_protocol::diagnosticWord(name), errno);
             left.clear(); // A partial listing would read as the folder's kept entries; nothing was deleted.
             return 1;
@@ -259,7 +249,7 @@ int clear_acquisition(const string& rep, vector<string>& left, string& error)
     }
     sort(left.begin(), left.end());
     for (const string& name : outputs) {
-        if (unlinkat(dir.fd, name.c_str(), 0) != 0) {
+        if (unlinkat(run_folder.fd(), name.c_str(), 0) != 0) {
             fail("unlink " + acquisition_protocol::diagnosticWord(name), errno);
             return 1;
         }

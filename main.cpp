@@ -2,6 +2,7 @@
 
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <iostream>
 #include <fstream>
 
@@ -113,14 +114,14 @@ ArvStream* StartAcquisition(ArvCamera* camera);
 void StopAcquisition(ArvCamera* camera, ArvStream* stream);
 bool ConfigureSoftwareTrigger(ArvCamera* camera);
 bool AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
-                   const string& acquis_path,
+                   const RunFolder& folder,
                    const vector<ScanFrameCommand>& commands,
-                   FrameLoopOptions options, int bytes_per_pixel, int cv_type, size_t& frames);
+                   FrameLoopOptions options, int bytes_per_pixel, int cv_type, size_t& frames, string& error);
 bool AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
-                         const string& acquis_path, int dimROI,
+                         const RunFolder& folder, int dimROI,
                          int offsetROI_X, int offsetROI_Y,
                          const string& pixel_format_str, int settle_ms,
-                         int bytes_per_pixel, int cv_type);
+                         int bytes_per_pixel, int cv_type, string& write_error);
 
 // All run configuration and schedules are resolved before clearing files or commanding hardware.
 // Both CLI and RUN use this function; no per-run data is retained by the connection.
@@ -442,8 +443,12 @@ static RunResult runOnce(const map<string, string>& args, Connection& connection
         return RunResult(1, 0, "RUN CAMERA_ID differs from the session connection; nothing cleared or moved");
     if (StopRequested()) return RunResult(1, 0, "acquisition stopped");
 
+    RunFolder folder(c.acquis_path);
+    if (folder.fd() < 0)
+        return RunResult(1, 0, "Cannot clear acquisition directory " +
+            acquisition_protocol::diagnosticWord(c.acquis_path) + ": opendir: " + strerror(folder.open_error()));
     vector<string> left;
-    const int clear_status = clear_acquisition(c.acquis_path, left, error);
+    const int clear_status = clear_acquisition(folder, left, error);
     if (!left.empty()) {
         cerr << "Warning: kept entries in " << acquisition_protocol::diagnosticWord(c.acquis_path) << ": ";
         const size_t shown = min(left.size(), size_t(20));
@@ -462,9 +467,12 @@ static RunResult runOnce(const map<string, string>& args, Connection& connection
         if (!MoveFsm(connection.dac.get(), c.VfOffset.x, c.VfOffset.y, "at the scan centre"))
             return RunResult(1, 0, "FSM DAC write failed twice at the scan centre");
         const string table = c.acquis_path + "/fsm_frame_commands.csv";
-        if (!write_scan_frame_commands_csv(table, c.frame_commands, error, c.fsm_schedule))
+        string table_text;
+        if (!scan_frame_commands_csv(c.frame_commands, table_text, error, c.fsm_schedule))
+            return RunResult(1, 0, "Cannot persist scan schedule " + acquisition_protocol::diagnosticWord(table) + ": " + error);
+        if (!folder.publish("fsm_frame_commands.csv", table_text, error))
             return RunResult(1, 0, "Cannot persist scan schedule: " + error);
-        if (c.fsm_schedule && !write_fsm_schedule_copy(c.acquis_path + "/fsm_schedule.csv", c.fsm_schedule_text, error))
+        if (c.fsm_schedule && !folder.publish("fsm_schedule.csv", c.fsm_schedule_text, error))
             return RunResult(1, 0, "Cannot save the FSM schedule copy: " + error);
         cout << "Saved capture-aligned FSM schedule to " << table;
         if (c.fsm_schedule) cout << " and " << c.acquis_path << "/fsm_schedule.csv";
@@ -480,14 +488,14 @@ static RunResult runOnce(const map<string, string>& args, Connection& connection
     }
     RunResult result;
     try {
-        if (!AcquireImages(connection.camera, connection.dac.get(), c.acquis_path, c.frame_commands,
-                           c.frame_loop_options, c.bytes_per_pixel, c.cv_type, result.frames))
-            throw runtime_error("hologram acquisition did not complete");
+        if (!AcquireImages(connection.camera, connection.dac.get(), folder, c.frame_commands,
+                           c.frame_loop_options, c.bytes_per_pixel, c.cv_type, result.frames, error))
+            throw runtime_error(error.empty() ? "hologram acquisition did not complete" : error);
         if (c.b_AmpliRef == 1 && !c.fsm_schedule)
-            if (!AcquireIntensityRef(connection.camera, connection.dac.get(), c.acquis_path, c.dimROI,
+            if (!AcquireIntensityRef(connection.camera, connection.dac.get(), folder, c.dimROI,
                                      c.offsetROI_X, c.offsetROI_Y, c.pixel_format_str,
-                                     c.fsm_settle_ms, c.bytes_per_pixel, c.cv_type))
-                throw runtime_error("reference acquisition did not complete");
+                                     c.fsm_settle_ms, c.bytes_per_pixel, c.cv_type, error))
+                throw runtime_error(error.empty() ? "reference acquisition did not complete" : error);
     } catch (const exception& e) {
         result.status = -1;
         result.error = e.what();
@@ -1115,7 +1123,9 @@ struct AcquisitionFrameIO {
     ArvCamera* camera;
     ArvStream* stream;
     Ljack_DAC* dac;
-    const string& acquis_path;
+    const RunFolder& folder;
+    vector<uchar> encoded;
+    string output_error;
     const vector<ScanFrameCommand>& commands;
     FrameLoopOptions options;
     int bytes_per_pixel, cv_type;
@@ -1127,9 +1137,9 @@ struct AcquisitionFrameIO {
     double t_last = (double)cv::getTickCount();
     double current_fps = 0, bandwidth_MBps = 0;
 
-    AcquisitionFrameIO(ArvCamera* camera_, ArvStream* stream_, Ljack_DAC* dac_, const string& path,
+    AcquisitionFrameIO(ArvCamera* camera_, ArvStream* stream_, Ljack_DAC* dac_, const RunFolder& folder_,
                        const vector<ScanFrameCommand>& commands_, FrameLoopOptions options_, int bytes, int type)
-        : camera(camera_), stream(stream_), dac(dac_), acquis_path(path), commands(commands_),
+        : camera(camera_), stream(stream_), dac(dac_), folder(folder_), commands(commands_),
           options(options_), bytes_per_pixel(bytes), cv_type(type)
     {
         ArvDevice* device = arv_camera_get_device(camera);
@@ -1211,22 +1221,26 @@ struct AcquisitionFrameIO {
         return true;
     }
     bool write(size_t k, Buffer buffer) {
-        // The buffer stays held until imwrite returns, including when OpenCV throws.
+        // The camera buffer stays held until encoding and the complete write return.
+        const string name = format("i%03zu.pgm", k);
         try {
             size_t data_size;
             const void* data = arv_buffer_get_image_data(buffer, &data_size);
             cv::Mat frame(arv_buffer_get_image_height(buffer), arv_buffer_get_image_width(buffer),
                           cv_type, const_cast<void*>(data));
-            if (imwrite(acquis_path + format("/i%03zu.pgm", k), frame)) {
+            if (!imencode(".pgm", frame, encoded))
+                output_error = acquisition_protocol::diagnosticWord(folder.path() + "/" + name) + ": encoding failed";
+            else if (folder.create(name, encoded.data(), encoded.size(), output_error)) {
                 ++frames;
                 return true;
             }
         } catch (const std::exception& error) {
-            cerr << "Image write error: " << error.what() << endl;
+            output_error = acquisition_protocol::diagnosticWord(folder.path() + "/" + name) + ": " + error.what();
         }
-        cerr << "Failed to write image i" << setw(3) << setfill('0') << k << setfill(' ') << endl;
+        cerr << "Image write error: " << output_error << endl;
         return false;
     }
+
     void progress(size_t k, Buffer buffer) {
         const char doodle[] = "|\\-|-/";
         cout << fixed << setprecision(1);
@@ -1254,11 +1268,18 @@ struct AcquisitionFrameIO {
             cerr << "Warning: camera timestamp meaning is not the exposure start; slack checks are not trustworthy" << endl;
         if (summary.latch_uncertain)
             cerr << "Warning: latch_uncertain; latch checks are inconclusive" << endl;
-        string error;
-        if (!write_frame_timing_csv(acquis_path + "/frame_timing.csv", rows, options.settle_ms, error))
-            cerr << "Warning: cannot write the frame timing: " << error << endl;
-        if (!write_frame_timing_summary(acquis_path + "/frame_timing_summary.json", summary, error))
-            cerr << "Warning: cannot write the frame timing summary: " << error << endl;
+        // Preserve the first scan failure; a taken timing name fails an otherwise completed run.
+        if (!success && output_error.empty()) output_error = "hologram acquisition did not complete";
+        auto timing_output = [&](const string& name, const char* label, const string& text) {
+            string error;
+            RunFolder::Failure failure;
+            if (!folder.create(name, text.data(), text.size(), error, &failure)) {
+                if (failure == RunFolder::Failure::taken && output_error.empty()) output_error = error;
+                cerr << "Warning: cannot write the " << label << ": " << error << endl;
+            }
+        };
+        timing_output("frame_timing.csv", "frame timing", frame_timing_csv(rows, options.settle_ms));
+        timing_output("frame_timing_summary.json", "frame timing summary", frame_timing_summary_json(summary));
         cout << "Stopping acquisition..." << endl;
         // AcquireImages owns the stream: its scope guard stops/releases it even if timing output throws.
     }
@@ -1266,9 +1287,9 @@ struct AcquisitionFrameIO {
 
 // Acquire hologram images
 bool AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
-                   const string& acquis_path,
+                   const RunFolder& folder,
                    const vector<ScanFrameCommand>& commands,
-                   FrameLoopOptions options, int bytes_per_pixel, int cv_type, size_t& frames)
+                   FrameLoopOptions options, int bytes_per_pixel, int cv_type, size_t& frames, string& error)
 {
     cout << "Starting acquisition..." << endl;
     double exposure_us;
@@ -1289,20 +1310,21 @@ bool AcquireImages(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
     unique_ptr<ArvStream, function<void(ArvStream*)>> stream_owner(stream,
         [camera](ArvStream* s) { StopAcquisition(camera, s); });
     cout << endl << "##-- Hologram Acquisition --##" << endl;
-    AcquisitionFrameIO io(camera, stream, DAC_tiptilt, acquis_path, commands, options, bytes_per_pixel, cv_type);
+    AcquisitionFrameIO io(camera, stream, DAC_tiptilt, folder, commands, options, bytes_per_pixel, cv_type);
     io.first_latch = io.latch();
     vector<FrameTiming> timing;
     const bool complete = run_frame_loop(commands.size(), options, io, timing);
     frames = io.frames;
-    return complete;
+    error = io.output_error;
+    return complete && error.empty();
 }
 
 // Acquire reference intensity image; all exits return its buffer and stop its private stream.
 bool AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
-                         const string& acquis_path, int dimROI,
+                         const RunFolder& folder, int dimROI,
                          int offsetROI_X, int offsetROI_Y,
                          const string& pixel_format_str, int settle_ms,
-                         int bytes_per_pixel, int cv_type)
+                         int bytes_per_pixel, int cv_type, string& write_error)
 {
     if (StopRequested()) return false;
     if (!MoveFsm(DAC_tiptilt, 0, 8, "for the intensity reference")) return false;
@@ -1343,10 +1365,17 @@ bool AcquireIntensityRef(ArvCamera* camera, Ljack_DAC *DAC_tiptilt,
     const int width = arv_buffer_get_image_width(buffer), height = arv_buffer_get_image_height(buffer);
     cout << "  W: " << width << " H: " << height << endl;
     cv::Mat frame(height, width, cv_type, const_cast<void*>(data));
-    if (!imwrite(acquis_path + "/Intensite_ref.pgm", frame)) {
-        cerr << "Failed to write reference intensity" << endl;
-        return false;
+    vector<uchar> encoded;
+    try {
+        if (!imencode(".pgm", frame, encoded))
+            write_error = acquisition_protocol::diagnosticWord(folder.path() + "/Intensite_ref.pgm") + ": encoding failed";
+        else if (folder.create("Intensite_ref.pgm", encoded.data(), encoded.size(), write_error)) {
+            cout << "Reference intensity saved to " << folder.path() << endl;
+            return !StopRequested();
+        }
+    } catch (const std::exception& error) {
+        write_error = acquisition_protocol::diagnosticWord(folder.path() + "/Intensite_ref.pgm") + ": " + error.what();
     }
-    cout << "Reference intensity saved to " << acquis_path << endl;
-    return !StopRequested();
+    cerr << "Failed to write reference intensity: " << write_error << endl;
+    return false;
 }

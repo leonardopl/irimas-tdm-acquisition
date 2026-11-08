@@ -31,9 +31,10 @@ bool build_scan_frame_commands(
 
 // A scan table: row 0 is the centre (scan_command_index -1), row k has scan_command_index k - 1. An FSM schedule's table
 // (`fsm_schedule`) has scan_command_index k in row k (the schedule's row).
-bool write_scan_frame_commands_csv(
-    const std::string& path,
+// Validates the row contract and returns the CSV text; no filesystem I/O.
+bool scan_frame_commands_csv(
     const std::vector<ScanFrameCommand>& commands,
+    std::string& text,
     std::string& error,
     bool fsm_schedule = false);
 
@@ -96,10 +97,4 @@ bool build_fsm_schedule_frame_commands(
     double vymax,
     double na_cond_lim,
     std::vector<ScanFrameCommand>& commands,
-    std::string& error);
-
-// The schedule's text as read, saved beside the frames (acquis/fsm_schedule.csv).
-bool write_fsm_schedule_copy(
-    const std::string& path,
-    const std::string& text,
     std::string& error);

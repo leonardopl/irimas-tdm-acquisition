@@ -176,12 +176,13 @@ bool build_scan_frame_commands(
     return true;
 }
 
-bool write_scan_frame_commands_csv(
-    const std::string& path,
+bool scan_frame_commands_csv(
     const std::vector<ScanFrameCommand>& commands,
+    std::string& text,
     std::string& error,
     bool fsm_schedule)
 {
+    text.clear();
     error.clear();
     if (commands.empty())
         return fail("cannot write an empty frame-command table", error);
@@ -196,10 +197,7 @@ bool write_scan_frame_commands_csv(
             return fail("frame-command table violates its row contract", error);
     }
 
-    const std::string temporary = path + ".tmp";
-    std::ofstream out(temporary.c_str(), std::ios::out | std::ios::trunc);
-    if (!out)
-        return fail("cannot open temporary frame-command table: " + temporary, error);
+    std::ostringstream out;
     out << "schema_version,image_index,scan_command_index,normalized_scan_x,"
            "normalized_scan_y,command_vx_v,command_vy_v\n";
     out << std::setprecision(17);
@@ -209,15 +207,9 @@ bool write_scan_frame_commands_csv(
             << command.normalized_scan_x << ',' << command.normalized_scan_y << ','
             << command.command_vx_v << ',' << command.command_vy_v << '\n';
     }
-    out.close();
-    if (!out.good()) {
-        std::remove(temporary.c_str());
-        return fail("failed while writing frame-command table", error);
-    }
-    if (std::rename(temporary.c_str(), path.c_str()) != 0) {
-        std::remove(temporary.c_str());
-        return fail("cannot publish frame-command table: " + path, error);
-    }
+    if (!out.good())
+        return fail("failed while formatting frame-command table", error);
+    text = out.str();
     return true;
 }
 
@@ -473,29 +465,6 @@ bool build_fsm_schedule_frame_commands(
             row.vy_v
         };
         commands.push_back(command);
-    }
-    return true;
-}
-
-bool write_fsm_schedule_copy(
-    const std::string& path,
-    const std::string& text,
-    std::string& error)
-{
-    error.clear();
-    const std::string temporary = path + ".tmp";
-    std::ofstream out(temporary.c_str(), std::ios::out | std::ios::trunc | std::ios::binary);
-    if (!out)
-        return fail("cannot open " + temporary, error);
-    out.write(text.data(), static_cast<std::streamsize>(text.size()));
-    out.close();
-    if (!out.good()) {
-        std::remove(temporary.c_str());
-        return fail("failed while writing " + temporary, error);
-    }
-    if (std::rename(temporary.c_str(), path.c_str()) != 0) {
-        std::remove(temporary.c_str());
-        return fail("cannot publish " + path, error);
     }
     return true;
 }

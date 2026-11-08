@@ -10,6 +10,15 @@
 
 namespace {
 
+// Only reader round trips need a file; production writers are text builders.
+bool write_fixture(const std::string& path, const std::string& text)
+{
+    std::ofstream out(path.c_str(), std::ios::binary);
+    out << text;
+    out.close();
+    return out.good();
+}
+
 struct FakeIO {
     struct Image { std::size_t index; };
     typedef Image* Buffer;
@@ -421,13 +430,7 @@ std::vector<FrameTiming> synthetic_rows()
 
 std::string summary_json(const FrameTimingSummary& summary)
 {
-    const std::string path = "/tmp/tdm_frame_loop_context.json";
-    std::string error;
-    assert(write_frame_timing_summary(path, summary, error));
-    std::ifstream input(path.c_str());
-    const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-    std::remove(path.c_str());
-    return json;
+    return frame_timing_summary_json(summary);
 }
 
 void check_invalid_overlap_exposure()
@@ -643,7 +646,7 @@ void check_real_timing_replays()
     }
 }
 
-// write_frame_timing_csv -> read_frame_timing_csv gives the rows back (times to the 3 decimals written, derived columns
+// frame_timing_csv -> fixture -> read_frame_timing_csv gives the rows back (times to the 3 decimals written, derived columns
 // to 6, empty ones NaN) and the settle; any other file is refused with its reason.
 void check_csv_round_trip(const std::string& path, const std::vector<FrameTiming>& written)
 {
@@ -672,7 +675,7 @@ void check_csv_round_trip(const std::string& path, const std::vector<FrameTiming
     std::vector<FrameTiming> lost = written;
     lost[1].buffer_ms = lost[1].written_ms = -1;
     lost[1].exposure_start_host_ms = lost[1].next_dac_slack_ms = NAN;
-    assert(write_frame_timing_csv(path, lost, 5, error));
+    assert(write_fixture(path, frame_timing_csv(lost, 5)));
     assert(read_frame_timing_csv(path, rows, settle, error) && rows.size() == lost.size());
     assert(near(rows[1].buffer_ms, -1) && near(rows[1].written_ms, -1) && std::isnan(rows[1].exposure_start_host_ms));
     // CRLF line ends read the same.
@@ -711,7 +714,7 @@ void check_csv_round_trip(const std::string& path, const std::vector<FrameTiming
     assert(read_frame_timing_csv(path, rows, settle, error) && settle == -1 && rows.size() == lost.size());
     assert(rows[0].settle_ms == 7 && rows[1].settle_ms == 5 && rows[2].settle_ms == 5);
     // One settle in every row: the rows keep -1, as before.
-    assert(write_frame_timing_csv(path, lost, 5, error));
+    assert(write_fixture(path, frame_timing_csv(lost, 5)));
     assert(read_frame_timing_csv(path, rows, settle, error) && settle == 5);
     for (const FrameTiming& row : rows)
         assert(row.settle_ms == -1);
@@ -866,7 +869,7 @@ void check_timing()
            "latch_uncertainty_ms=0.200000 latch=ok verdict=ok");
     const std::string path = "/tmp/tdm_frame_loop_summary.json";
     std::string error;
-    assert(write_frame_timing_summary(path, summary, error));
+    assert(write_fixture(path, frame_timing_summary_json(summary)));
     std::ifstream input(path.c_str());
     const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
     assert(json.find("\"min_slack_ms\": 0.756000") != std::string::npos);
@@ -885,7 +888,7 @@ void check_timing()
     assert(json.find("{\n  \"rules_version\": 2,\n  \"mode\": \"overlap\",\n") == 0 && frame_timing_rules_version == 2);
     std::remove(path.c_str());
     summary = check_frame_timing(rows, false, 5, 244, 500);
-    assert(write_frame_timing_summary(path, summary, error));
+    assert(write_fixture(path, frame_timing_summary_json(summary)));
     std::ifstream absent_input(path.c_str());
     const std::string absent_json((std::istreambuf_iterator<char>(absent_input)), std::istreambuf_iterator<char>());
     assert(absent_json.find("\"min_slack_ms\": null") != std::string::npos);
@@ -895,10 +898,10 @@ void check_timing()
     assert(absent_json.find("\"trigger_done_delay_median_ms\": null") != std::string::npos);
     assert(absent_json.find("\"latch_uncertainty_ms\": null") != std::string::npos);
     std::remove(path.c_str());
-    assert(!write_frame_timing_summary("/nonexistent-dir/summary.json", summary, error));
+    assert(!write_fixture("/nonexistent-dir/summary.json", frame_timing_summary_json(summary)));
     check_frame_timing(rows, true, 5, 244, 500, clock);
     const std::string csv_path = "/tmp/tdm_frame_loop.csv";
-    assert(write_frame_timing_csv(csv_path, rows, 5, error));
+    assert(write_fixture(csv_path, frame_timing_csv(rows, 5)));
     std::ifstream csv(csv_path.c_str());
     std::string line;
     std::getline(csv, line);
@@ -912,7 +915,7 @@ void check_timing()
     rows.resize(1);
     rows[0].camera_timestamp_ns += 2000000ULL;
     summary = check_frame_timing(rows, false, 5, 244, 500, clock);
-    assert(write_frame_timing_summary(path, summary, error));
+    assert(write_fixture(path, frame_timing_summary_json(summary)));
     std::ifstream suspect_input(path.c_str());
     const std::string suspect_json((std::istreambuf_iterator<char>(suspect_input)), std::istreambuf_iterator<char>());
     assert(suspect_json.find("\"timestamp_meaning_suspect\": true") != std::string::npos);
@@ -964,7 +967,7 @@ void check_schedule_settle(bool overlap)
     // The CSV records each frame's settle; it reads back per frame and re-checks to the same verdict.
     const std::string path = "/tmp/tdm_frame_loop_schedule_" + std::to_string(getpid()) + ".csv";
     std::string error;
-    assert(write_frame_timing_csv(path, rows, config.settle_ms, error));
+    assert(write_fixture(path, frame_timing_csv(rows, config.settle_ms)));
     std::ifstream input(path.c_str());
     std::string line;
     std::getline(input, line);
