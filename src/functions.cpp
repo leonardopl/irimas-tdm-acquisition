@@ -1,4 +1,5 @@
 #include "functions.h"
+#include "acquisition_protocol.h"
 #include <tiffio.h>
 #include <dirent.h>
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <cmath>
 #include <iomanip>
 #include <sys/stat.h>
+#include <unistd.h>
 #define PI 3.14159
 
 bool resolve_config_path(const string& config_dir, const string& canonical_name,
@@ -46,20 +48,6 @@ bool resolve_config_path(const string& config_dir, const string& canonical_name,
     }
     resolved_path = canonical_exists ? canonical_path : legacy_path;
     return true;
-}
-
-map<string, string> parse_args(int argc, char *argv[])
-{
-    map<string, string> overrides;
-    for (int i = 1; i < argc - 1; i += 2)
-    {
-        string arg = argv[i];
-        if (arg.substr(0, 2) == "--")
-        {
-            overrides[arg.substr(2)] = argv[i + 1];
-        }
-    }
-    return overrides;
 }
 
 float get_val(const string& key, const string& file_path, const map<string, string>& overrides)
@@ -171,17 +159,42 @@ string ampli_ref_config_path(const string& acquisition_path, const string& proce
     return acquisition_path;
 }
 
-int clear_acquisition(string rep, string chemin_config_manip, string chemin_recon, string& error)
+namespace {
+bool indexed_frame(const string& name, const string& extension)
 {
+    if (name.size() < 4 + extension.size() || name[0] != 'i' ||
+        name.compare(name.size() - extension.size(), extension.size(), extension) != 0) return false;
+    for (size_t i = 1; i < name.size() - extension.size(); ++i)
+        if (name[i] < '0' || name[i] > '9') return false;
+    return true;
+}
+} // namespace
+
+bool is_acquisition_output(const string& name)
+{
+    // main.cpp: AcquisitionFrameIO writes i%03zu.pgm and both frame_timing files;
+    // AcquireIntensityRef writes Intensite_ref.pgm. src/scan_schedule.cpp writes the
+    // two fsm CSVs via their .tmp files before renaming them.
+    return indexed_frame(name, ".pgm") || name == "Intensite_ref.pgm" ||
+        name == "fsm_frame_commands.csv" || name == "fsm_frame_commands.csv.tmp" ||
+        name == "fsm_schedule.csv" || name == "fsm_schedule.csv.tmp" ||
+        name == "frame_timing.csv" || name == "frame_timing_summary.json";
+}
+
+int clear_acquisition(const string& rep, vector<string>& left, string& error)
+{
+    left.clear();
     error.clear();
     auto fail = [&](const string& operation, int code) {
-        error = "Cannot clear acquisition directory " + rep + ": " + operation + ": " + strerror(code);
+        error = "Cannot clear acquisition directory " + acquisition_protocol::diagnosticWord(rep) +
+                ": " + operation + ": " + strerror(code);
     };
     DIR* folder = opendir(rep.c_str());
     if (!folder) {
         fail("opendir", errno);
         return 1;
     }
+    vector<string> names;
     for (;;) {
         errno = 0;
         const dirent* entry = readdir(folder);
@@ -191,16 +204,49 @@ int clear_acquisition(string rep, string chemin_config_manip, string chemin_reco
         }
         const string name = entry->d_name;
         if (name == "." || name == "..") continue;
-        const string filepath = rep + "/" + name;
-        if (filepath == chemin_config_manip || filepath == chemin_recon) continue;
-        if (remove(filepath.c_str()) != 0) {
-            const int code = errno;
-            cerr << "Warning: cannot remove " << filepath << ": " << strerror(code) << endl;
+        names.push_back(name);
+    }
+    if (closedir(folder) != 0 && error.empty()) fail("closedir", errno);
+    if (!error.empty()) return 1;
+    sort(names.begin(), names.end());
+    // Check the entire listing before removing anything: archives cannot mix with a new run.
+    for (const string& name : names) {
+        if (indexed_frame(name, ".png") || indexed_frame(name, ".jxl")) {
+            error = "Cannot clear acquisition directory " + acquisition_protocol::diagnosticWord(rep) +
+                    ": archived frame " + acquisition_protocol::diagnosticWord(name) +
+                    "; choose an empty folder";
+            return 1;
         }
     }
-    if (closedir(folder) != 0)
-        cerr << "Warning: cannot close acquisition directory " << rep << ": " << strerror(errno) << endl;
-    return error.empty() ? 0 : 1;
+    vector<string> outputs;
+    for (const string& name : names) {
+        struct stat info;
+        if (lstat((rep + "/" + name).c_str(), &info) != 0) {
+            fail("lstat " + acquisition_protocol::diagnosticWord(name), errno);
+            left.clear(); // A partial listing would read as the folder's kept entries; nothing was deleted.
+            return 1;
+        }
+        if (is_acquisition_output(name) && !S_ISREG(info.st_mode) && !S_ISLNK(info.st_mode)) {
+            // The run writes this very name: a FIFO would block it mid-scan, a directory fail it after the FSM moved.
+            error = "Cannot clear acquisition directory " + acquisition_protocol::diagnosticWord(rep) +
+                    ": own output name " + acquisition_protocol::diagnosticWord(name) +
+                    " is not a regular file; choose an empty folder";
+            left.clear();
+            return 1;
+        }
+        if (is_acquisition_output(name))
+            outputs.push_back(name);
+        else
+            left.push_back(name + (S_ISDIR(info.st_mode) ? "/" : ""));
+    }
+    sort(left.begin(), left.end());
+    for (const string& name : outputs) {
+        if (unlink((rep + "/" + name).c_str()) != 0) {
+            fail("unlink " + acquisition_protocol::diagnosticWord(name), errno);
+            return 1;
+        }
+    }
+    return 0;
 }
 
 namespace {

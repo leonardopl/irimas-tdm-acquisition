@@ -6,8 +6,77 @@
 
 using namespace acquisition_protocol;
 
+static void arguments()
+{
+    std::map<std::string, std::string> args;
+    std::string error;
+    for (ArgumentOrigin origin : {ArgumentOrigin::Launch, ArgumentOrigin::Run}) {
+        assert(parseArguments({}, origin, args, error) && args.empty() && error.empty());
+        assert(parseArguments({"--CHEMIN_CONFIG", " /tmp/a # b \t", "--VXMIN", "-3.7", "--PIXEL_FORMAT", ""},
+            origin, args, error));
+        assert(args.at("CHEMIN_CONFIG") == " /tmp/a # b \t" && args.at("VXMIN") == "-3.7" && args.at("PIXEL_FORMAT").empty());
+    }
+    assert(parseArguments({"--CAMERA_ID", "id", "--SESSION", "1", "--DIM_ROI", "32"}, ArgumentOrigin::Launch, args, error));
+    assert(args.at("SESSION") == "1" && args.at("CAMERA_ID") == "id");
+    // Every table entry is accepted in exactly its advertised contexts.
+    for (const auto& key : argumentKeys()) {
+        const std::string word = std::string("--") + key.name;
+        const std::string value = key.scope == KeyScope::LaunchOnly ? "1" : "value";
+        assert(parseArguments({word, value}, ArgumentOrigin::Launch, args, error));
+        const bool run_ok = parseArguments({word, value}, ArgumentOrigin::Run, args, error);
+        assert(run_ok == (key.scope != KeyScope::LaunchOnly));
+        if (key.scope == KeyScope::LaunchOnly) continue;
+        const bool session_ok = parseArguments({word, value, "--SESSION", "1"}, ArgumentOrigin::Launch, args, error);
+        assert(session_ok == (key.scope == KeyScope::Connection));
+        if (!session_ok) assert(error.find("belongs to RUN") != std::string::npos);
+    }
+    struct Refusal {
+        std::vector<std::string> words;
+        ArgumentOrigin origin;
+        const char* bad;
+        const char* reason;
+        bool session;
+    };
+    const Refusal refusals[] = {
+        {{"bare"}, ArgumentOrigin::Launch, "bare", "--KEY VALUE", false},
+        {{"-x", "1"}, ArgumentOrigin::Launch, "-x", "--KEY VALUE", false},
+        {{"--FOO", "1"}, ArgumentOrigin::Launch, "--FOO", "--KEY VALUE", false},
+        {{"--NB_HOLO=3"}, ArgumentOrigin::Launch, "--NB_HOLO=3", "--KEY VALUE", false},
+        {{"--NB_HOLO"}, ArgumentOrigin::Launch, "--NB_HOLO", "missing value", false},
+        {{"--CHEMIN_ACQUIS", "--NB_HOLO", "3"}, ArgumentOrigin::Launch, "--CHEMIN_ACQUIS", "missing value", false},
+        {{"--NB_HOLO", "3", "--NB_HOLO", "4"}, ArgumentOrigin::Launch, "--NB_HOLO", "duplicate", false},
+        {{"--SESSION", "0"}, ArgumentOrigin::Launch, "0", "expected 1", false},
+        {{"--SESSION", "01"}, ArgumentOrigin::Launch, "01", "expected 1", false},
+        {{"--SESSION", ""}, ArgumentOrigin::Launch, "--SESSION", "expected 1", false},
+        {{"--SESSION", "1", "--NB_HOLO", "3"}, ArgumentOrigin::Launch, "--NB_HOLO", "belongs to RUN", true},
+        {{"--NB_HOLO", "3", "--SESSION", "1"}, ArgumentOrigin::Launch, "--NB_HOLO", "belongs to RUN", true},
+        {{"--SESSION", "1"}, ArgumentOrigin::Run, "--SESSION", "launch only", false},
+        {{"--FOO", "1"}, ArgumentOrigin::Run, "--FOO", "--KEY VALUE", false},
+        {{"--NB_HOLO", "3", "--NB_HOLO", "4"}, ArgumentOrigin::Run, "--NB_HOLO", "duplicate", false},
+        {{"--NB_HOLO"}, ArgumentOrigin::Run, "--NB_HOLO", "missing value", false},
+        {{"--NB_HOLO", "3", "bare"}, ArgumentOrigin::Run, "bare", "--KEY VALUE", false}
+    };
+    for (const auto& refusal : refusals) {
+        args = {{"old", "value"}};
+        assert(!parseArguments(refusal.words, refusal.origin, args, error) && args.empty());
+        assert(error.find(refusal.bad) != std::string::npos && error.find(refusal.reason) != std::string::npos);
+        assert(error.find("valid keys: " + validKeys(refusal.origin, refusal.session)) != std::string::npos);
+    }
+    assert(helpRequested({"--help"}) && helpRequested({"-h"}));
+    assert(helpRequested({"--NB_HOLO", "3", "--help"}) && helpRequested({"--PIXEL_FORMAT", "-h"}));
+    assert(helpRequested({"bare", "--help", "--SESSION", "0"}));
+    assert(!helpRequested({}) && !helpRequested({"--HELP", "--help=1", "help"}));
+    assert(sessionRequested({"--SESSION", "1"}) && sessionRequested({"--DIM_ROI", "32", "--SESSION", "1", "--NB_HOLO", "3"}));
+    assert(!sessionRequested({}) && !sessionRequested({"--SESSION"}) && !sessionRequested({"--SESSION", "0"}));
+    // --SESSION in a value position does not count, as in parseArguments' session-launch scope.
+    assert(!sessionRequested({"--CAMERA_ID", "--SESSION"}) && !sessionRequested({"--CAMERA_ID", "--SESSION", "1"}));
+    assert(!parseArguments({"bad\nword"}, ArgumentOrigin::Launch, args, error));
+    assert(error.find('\n') == std::string::npos);
+}
+
 int main()
 {
+    arguments();
     assert(session_protocol_version == 1);
     assert(std::string(session_protocol_marker) == "TDM_SESSION_PROTOCOL=1");
     const std::vector<std::string> words = {"plain", "two words", "quote\"here", "back\\slash", "", "µλ波長", "a\tb", "="};

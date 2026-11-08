@@ -70,7 +70,7 @@ spaces or tabs (aligned columns work); the value is the rest of the line up to a
 (internal ones kept). `KEY=value` is not read. A key with no value (a bare key, blanks or a comment only) counts as
 absent, as in the GUI's numeric reads. The GUI still keeps a comment in its text values, so give a text key
 (`SCAN_PATTERN`, `PIXEL_FORMAT`, ...) its comment on the line above. A path is cut at a `#`: never use one in
-`CHEMIN_ACQUIS`, the folder whose files the program clears before a scan.
+`CHEMIN_ACQUIS`, the output folder where the program deletes only its earlier acquisition files before a scan.
 
 The key-value reader ignores unused keys such as `MODALITY` and `QWLSI_MASK_*`; `CONFIG_SCHEMA` only chooses the
 `AMPLI_REF` file, and an absent `CONFIG_SCHEMA` remains compatible with schema 1.
@@ -275,7 +275,7 @@ vx_v,vy_v,settle_ms,label
 2.075,-0.102,2,step 2 V settle 2 ms
 ```
 
-The whole file is read and checked before the acquis folder is cleared and before
+The whole file is read and checked before earlier acquisition files are removed and before
 the mirror moves: 1 to 4000 rows, every voltage finite and inside `VXMIN..VXMAX` and
 `VYMIN..VYMAX` (1 µV of float rounding allowed; such a value is clamped onto the
 limit), every settle an integer from 0 to 1000, valid limits and `NA_COND_LIM`.
@@ -314,15 +314,44 @@ it never processes the run as a tomography scan.
 ## Usage
 
 ```bash
+./bin/tdm_acquisition --help  # or -h; prints all keys without reading config or using hardware
 ./bin/tdm_acquisition
 # or
 ./run.sh
 ```
 
+One acquisition uses the camera, the FSM DAC and the config named by
+`~/.config/gui_tomo.conf`, and writes to `CHEMIN_ACQUIS` (default from that file).
+Overrides must be known `--KEY VALUE` pairs, once per key; `--KEY=VALUE`, bare
+words, unknown keys, duplicate keys and missing values are usage errors.
+Values are kept verbatim, including blanks, `#`, negative numbers and empty strings;
+a value starting with `--` counts as missing. `--help` or `-h` anywhere takes
+precedence over all other arguments. Exit codes: 0 success/help, 1 refused/stopped,
+2 usage error, 255 failure.
+
+Before each run, cleanup deletes only regular files or symlinks named `i` followed
+by at least three ASCII digits and `.pgm`, `Intensite_ref.pgm`,
+`fsm_frame_commands.csv`, `fsm_frame_commands.csv.tmp`, `fsm_schedule.csv`,
+`fsm_schedule.csv.tmp`, `frame_timing.csv` or `frame_timing_summary.json`.
+Other entries, including configs, hidden files and directories, are kept. One
+stderr warning lists the kept entries in sorted order, with `/` after directories,
+up to 20 names then a count of the rest. Cleanup never follows symlinks or recurses.
+Archived frames named `i` plus at least three digits and `.png` or `.jxl` refuse the
+run without deleting anything; choose an empty folder. So does an entry with one of
+the acquisition output names above that is not a regular file or symlink (a
+directory, a FIFO), since the run would write that name. Failure to remove an
+earlier acquisition file
+also refuses the run before hardware use; cleanup may already have removed other
+acquisition files.
+
 ## Session mode
 
 `--SESSION 1` opens one camera and one LabJack connection for multiple acquisitions.
-Configuration files and `--KEY value` overrides resolve as for the CLI. For example:
+Session launch accepts only `SESSION` (exactly `1`) and connection keys:
+`CHEMIN_CONFIG`, `CAMERA_ID`, `DIM_ROI`, `OFFSET_ROI_X`, `OFFSET_ROI_Y`, `PIXEL_FORMAT`.
+Run keys belong in `RUN` lines; passing one at session launch is a usage error.
+A usage error at a session launch also replies `ERROR message=...` on stdout and exits 2.
+Configuration files and `--KEY VALUE` overrides resolve as for the CLI. For example:
 
 ```bash
 ./bin/tdm_acquisition --SESSION 1 --CAMERA_ID 12345678 \
@@ -358,7 +387,8 @@ line endings are accepted; incomplete lines wait for their newline.
 
 Each RUN must resolve the session's actual DIM_ROI, OFFSET_ROI_X, OFFSET_ROI_Y and
 PIXEL_FORMAT. A mismatch replies `DONE status=1 frames=0 error=...` before clearing
-files or moving the mirror. Each accepted RUN clears its existing output folder,
+files or moving the mirror. Each accepted RUN removes only its earlier acquisition
+outputs under the cleanup rule above, keeps and warns about other entries, and
 starts fresh frame numbering, schedule, stream buffers, clock origin and timing
 state, and writes the same files as a CLI acquisition. Exposure is read again per
 RUN for the fixed-exposure/overlap checks. The connection remains open between RUNs;
@@ -366,7 +396,10 @@ there is no end-of-run park until session cleanup. Invalid configuration and sca
 schedules are validated before clearing or moving in both modes.
 
 Empty lines are ignored. Malformed lines and unknown commands receive `ERROR
-message=...` and leave the session usable. Commands received during RUN are queued
+message=...` and leave the session usable. RUN uses the same strict parser:
+unknown or duplicate keys, missing values and `--SESSION` receive `ERROR` before
+config resolution, cleanup or motion. A valid RUN can follow a refused line.
+Commands received during RUN are queued
 until its DONE. A failed acquisition returns its existing process status in DONE,
 mapped to the shell's exit value (`return_value & 0xff`: -1 becomes 255, 256 becomes 0).
 Failure of one RUN leaves the session available for QUIT or another RUN.

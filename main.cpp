@@ -442,8 +442,19 @@ static RunResult runOnce(const map<string, string>& args, Connection& connection
         return RunResult(1, 0, "RUN CAMERA_ID differs from the session connection; nothing cleared or moved");
     if (StopRequested()) return RunResult(1, 0, "acquisition stopped");
 
-    if (clear_acquisition(c.acquis_path, c.manip_config_path, c.recon_path, error) != 0)
-        return RunResult(1, 0, error);
+    vector<string> left;
+    const int clear_status = clear_acquisition(c.acquis_path, left, error);
+    if (!left.empty()) {
+        cerr << "Warning: kept entries in " << acquisition_protocol::diagnosticWord(c.acquis_path) << ": ";
+        const size_t shown = min(left.size(), size_t(20));
+        for (size_t i = 0; i < shown; ++i) {
+            if (i) cerr << ", ";
+            cerr << acquisition_protocol::diagnosticWord(left[i]);
+        }
+        if (shown < left.size()) cerr << ", ... and " << left.size() - shown << " more";
+        cerr << endl;
+    }
+    if (clear_status != 0) return RunResult(1, 0, error);
     try {
         // Preserve the CLI's hardware order: clear, open DAC, centre, persist schedule, open camera.
         if (!connection.dac) connection.openDac();
@@ -680,16 +691,13 @@ static int RunSession(const map<string, string>& launch_args, SessionReplies& re
             continue;
         }
         if (words[0] == "RUN") {
-            bool valid = words.size() % 2 == 1;
-            for (size_t i = 1; valid && i < words.size(); i += 2)
-                valid = words[i].size() > 2 && words[i].compare(0, 2, "--") == 0;
-            if (!valid) {
-                replies.send("ERROR", {{"message", "RUN requires --KEY value pairs"}});
+            map<string, string> args;
+            if (!acquisition_protocol::parseArguments(vector<string>(words.begin() + 1, words.end()),
+                    acquisition_protocol::ArgumentOrigin::Run, args, error)) {
+                replies.send("ERROR", {{"message", error}});
                 continue;
             }
-            vector<char*> argv;
-            for (string& word : words) argv.push_back(&word[0]);
-            const RunResult result = runOnce(parse_args(static_cast<int>(argv.size()), argv.data()), connection, true);
+            const RunResult result = runOnce(args, connection, true);
             const bool stopped_during_run = StopRequested();
             replies.send("DONE", {{"status", to_string(acquisition_protocol::doneStatus(result.status))},
                          {"frames", to_string(result.frames)}, {"error", result.error}});
@@ -701,8 +709,44 @@ static int RunSession(const map<string, string>& launch_args, SessionReplies& re
     return SignalStopRequested() ? 1 : 0; // EOF while idle is QUIT without BYE.
 }
 
+static void PrintUsage()
+{
+    cout << "Usage:\n"
+         << "  tdm_acquisition [--KEY VALUE ...]   one acquisition\n"
+         << "  tdm_acquisition --SESSION 1 [connection keys]   session mode; RUN lines on stdin\n"
+         << "  tdm_acquisition --help | -h\n\n"
+         << "Warning: one acquisition uses the camera, the FSM DAC and the config named by\n"
+         << "~/.config/gui_tomo.conf, and writes into CHEMIN_ACQUIS (default from gui_tomo.conf).\n"
+         << "Before a run, only regular files or symlinks named i + 3 or more ASCII digits + .pgm,\n"
+         << "Intensite_ref.pgm, fsm_frame_commands.csv[.tmp], fsm_schedule.csv[.tmp],\n"
+         << "frame_timing.csv and frame_timing_summary.json are deleted. Other entries are kept\n"
+         << "and warned about. Archived i + 3 or more digits + .png/.jxl frames, an entry with\n"
+         << "one of these names that is not a regular file or symlink (a directory, a FIFO), or\n"
+         << "a removal failure refuse the run. Directories are never removed.\n\n"
+         << "Use known --KEY VALUE pairs, once per key. Defaults come from acquisition.conf,\n"
+         << "processing.conf and ~/.config/gui_tomo.conf. Scopes:\n"
+         << "  launch only: session launch; connection: all launches and RUN; run: one-shot launch and RUN.\n";
+    for (const auto& key : acquisition_protocol::argumentKeys()) {
+        const char* scope = key.scope == acquisition_protocol::KeyScope::LaunchOnly ? "launch only" :
+            (key.scope == acquisition_protocol::KeyScope::Connection ? "connection" : "run");
+        cout << "  --" << key.name << " [" << scope << "] " << key.meaning << '\n';
+    }
+    cout << "\nExit codes: 0 ok / help; 1 refused or stopped; 2 usage error; 255 failure.\n";
+}
+
 int main(int argc, char* argv[])
 {
+    const vector<string> words = argc > 1 ? vector<string>(argv + 1, argv + argc) : vector<string>();
+    if (acquisition_protocol::helpRequested(words)) { PrintUsage(); return 0; }
+    map<string, string> args;
+    string error;
+    if (!acquisition_protocol::parseArguments(words, acquisition_protocol::ArgumentOrigin::Launch, args, error)) {
+        cerr << "tdm_acquisition: " << error << " (--help lists the keys)" << endl;
+        // A session client reads only stdout replies: a startup failure is an ERROR reply there too.
+        if (acquisition_protocol::sessionRequested(words))
+            cout << acquisition_protocol::formatReply("ERROR", {{"message", error}}) << '\n' << flush;
+        return 2;
+    }
     (void)session_capability;
     stop_requests.store(0, std::memory_order_relaxed);
     struct sigaction action = {};
@@ -710,7 +754,6 @@ int main(int argc, char* argv[])
     sigemptyset(&action.sa_mask);
     sigaction(SIGINT, &action, NULL);
     sigaction(SIGTERM, &action, NULL);
-    const map<string, string> args = parse_args(argc, argv);
     const auto session = args.find("SESSION");
     if (session != args.end() && session->second == "1") {
         signal(SIGPIPE, SIG_IGN);

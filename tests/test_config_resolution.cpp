@@ -1,4 +1,5 @@
 #include "functions.h"
+#include "acquisition_protocol.h"
 
 #include <algorithm>
 #include <cmath>
@@ -178,13 +179,11 @@ void check_inline_comments(const string& dir)
     assert(messages.str().find("Key EMPTY_ONLY not found in file " + path + "\n") != string::npos);
 
     // CLI values bypass config cleanup, even when they contain blanks or '#'.
-    char program[] = "test_config_resolution";
-    char pixel_key[] = "--PIXEL_FORMAT";
-    char pixel_value[] = " Mono16 # literal \t";
-    char settle_key[] = "--FSM_SETTLE_MS";
-    char settle_value[] = " 25 # literal ";
-    char* argv[] = {program, pixel_key, pixel_value, settle_key, settle_value};
-    const map<string, string> overrides = parse_args(5, argv);
+    const string pixel_value = " Mono16 # literal \t", settle_value = " 25 # literal ";
+    map<string, string> overrides;
+    string error;
+    assert(acquisition_protocol::parseArguments({"--PIXEL_FORMAT", pixel_value, "--FSM_SETTLE_MS", settle_value},
+        acquisition_protocol::ArgumentOrigin::Launch, overrides, error));
     assert(get_string("PIXEL_FORMAT", path, overrides) == pixel_value);
     assert(get_string("FSM_SETTLE_MS", path, overrides) == settle_value);
     assert(get_val("FSM_SETTLE_MS", path, overrides) == 25);

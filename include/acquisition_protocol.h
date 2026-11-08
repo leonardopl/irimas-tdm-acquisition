@@ -11,6 +11,136 @@ namespace acquisition_protocol {
 constexpr int session_protocol_version = 1;
 constexpr char session_protocol_marker[] = "TDM_SESSION_PROTOCOL=1";
 
+enum class KeyScope { LaunchOnly, Connection, Run };
+enum class ArgumentOrigin { Launch, Run };
+
+struct ArgumentKey {
+    const char* name;
+    KeyScope scope;
+    const char* meaning;
+};
+
+// The command-line vocabulary, also used by help and by clients validating RUN lines.
+inline const std::vector<ArgumentKey>& argumentKeys()
+{
+    static const std::vector<ArgumentKey> keys = {
+        {"SESSION", KeyScope::LaunchOnly, "1 opens session mode; no other value is accepted"},
+        {"CHEMIN_CONFIG", KeyScope::Connection, "configuration folder"},
+        {"CAMERA_ID", KeyScope::Connection, "camera serial number or Aravis device id"},
+        {"DIM_ROI", KeyScope::Connection, "square camera ROI dimension in pixels; -1 with offsets -1 keeps the current ROI"},
+        {"OFFSET_ROI_X", KeyScope::Connection, "camera ROI X offset in pixels"},
+        {"OFFSET_ROI_Y", KeyScope::Connection, "camera ROI Y offset in pixels"},
+        {"PIXEL_FORMAT", KeyScope::Connection, "Mono8, Mono12 or Mono16 (default Mono8)"},
+        {"CHEMIN_ACQUIS", KeyScope::Run, "output folder; its earlier acquisition files are deleted first"},
+        {"NB_HOLO", KeyScope::Run, "number of holograms"},
+        {"SCAN_PATTERN", KeyScope::Run, "scan pattern name"},
+        {"NB_CIRCLES_ANNULAR", KeyScope::Run, "number of circles for ANNULAR"},
+        {"SCAN_SEED", KeyScope::Run, "optional unsigned seed for RANDOM_POLAR"},
+        {"VXMIN", KeyScope::Run, "minimum mirror X voltage"},
+        {"VXMAX", KeyScope::Run, "maximum mirror X voltage"},
+        {"VYMIN", KeyScope::Run, "minimum mirror Y voltage"},
+        {"VYMAX", KeyScope::Run, "maximum mirror Y voltage"},
+        {"NA_COND_LIM", KeyScope::Run, "condenser NA limit in (0, 1]"},
+        {"NXMAX", KeyScope::Run, "crop half-width in Fourier bins; absent: derived from CROP_NA (or NA), LAMBDA, TPCAM, RF, F_OBJ, F_TUBE, DIM_ROI"},
+        {"CROP_NA", KeyScope::Run, "crop numerical aperture for derived NXMAX; absent: NA"},
+        {"NA", KeyScope::Run, "objective numerical aperture used when CROP_NA is absent"},
+        {"LAMBDA", KeyScope::Run, "wavelength in metres for derived NXMAX"},
+        {"TPCAM", KeyScope::Run, "camera pixel pitch in metres for derived NXMAX"},
+        {"RF", KeyScope::Run, "relay factor for derived NXMAX"},
+        {"F_OBJ", KeyScope::Run, "objective focal length in metres for derived NXMAX"},
+        {"F_TUBE", KeyScope::Run, "tube lens focal length in metres for derived NXMAX"},
+        {"FSM_SETTLE_MS", KeyScope::Run, "DAC-to-exposure delay in milliseconds; absent: derived from command steps"},
+        {"FSM_OVERLAP", KeyScope::Run, "0 sequential (default), 1 overlaps transfer with the next mirror move"},
+        {"FSM_OVERLAP_MARGIN_US", KeyScope::Run, "exposure guard in microseconds (default 500)"},
+        {"FSM_SCHEDULE", KeyScope::Run, "command line only: schedule CSV replacing the scan pattern and NB_HOLO"},
+        {"AMPLI_REF", KeyScope::Run, "1 also records Intensite_ref.pgm (except with FSM_SCHEDULE)"}
+    };
+    return keys;
+}
+
+inline bool keyAllowed(KeyScope scope, ArgumentOrigin origin, bool session_launch = false)
+{
+    if (scope == KeyScope::LaunchOnly) return origin == ArgumentOrigin::Launch;
+    return scope == KeyScope::Connection || !session_launch;
+}
+
+inline std::string validKeys(ArgumentOrigin origin, bool session_launch = false)
+{
+    std::string result;
+    for (const auto& key : argumentKeys()) {
+        if (!keyAllowed(key.scope, origin, session_launch)) continue;
+        if (!result.empty()) result += ", ";
+        result += std::string("--") + key.name;
+    }
+    return result;
+}
+
+// Safe for one-line diagnostics even when a CLI word or a filename contains controls.
+inline std::string diagnosticWord(const std::string& word)
+{
+    static const char hex[] = "0123456789abcdef";
+    std::string result = "\"";
+    for (unsigned char c : word) {
+        if (c < 32 || c == 127) {
+            result += "\\x";
+            result += hex[c >> 4]; result += hex[c & 15];
+        } else {
+            if (c == '"' || c == '\\') result += '\\';
+            result += static_cast<char>(c);
+        }
+    }
+    return result + '"';
+}
+
+// Help anywhere in launch words takes precedence over all argument errors and side effects.
+inline bool helpRequested(const std::vector<std::string>& words)
+{
+    for (const auto& word : words)
+        if (word == "--help" || word == "-h") return true;
+    return false;
+}
+
+// Launch words ask for session mode when a key position holds --SESSION with the value 1.
+inline bool sessionRequested(const std::vector<std::string>& words)
+{
+    for (std::size_t i = 0; i + 1 < words.size(); i += 2)
+        if (words[i] == "--SESSION" && words[i + 1] == "1") return true;
+    return false;
+}
+
+// Values are opaque: preserve blanks, '#', negative numbers and empty strings verbatim.
+// On failure the output map is empty, and the error includes the context's complete vocabulary.
+inline bool parseArguments(const std::vector<std::string>& words, ArgumentOrigin origin,
+                           std::map<std::string, std::string>& args, std::string& error)
+{
+    args.clear();
+    error.clear();
+    const bool session_launch = origin == ArgumentOrigin::Launch && sessionRequested(words);
+    const auto fail = [&](const std::string& reason) -> bool {
+        error = reason + "; valid keys: " + validKeys(origin, session_launch);
+        return false;
+    };
+    std::map<std::string, std::string> parsed;
+    for (std::size_t i = 0; i < words.size(); i += 2) {
+        const std::string& word = words[i];
+        const ArgumentKey* key = nullptr;
+        if (word.compare(0, 2, "--") == 0)
+            for (const auto& candidate : argumentKeys())
+                if (word.substr(2) == candidate.name) { key = &candidate; break; }
+        if (!key) return fail("invalid argument " + diagnosticWord(word) + "; use --KEY VALUE");
+        if (!keyAllowed(key->scope, origin, session_launch))
+            return fail(diagnosticWord(word) + (session_launch ? " belongs to RUN, not session launch" : " is launch only, not allowed in RUN"));
+        if (i + 1 == words.size() || words[i + 1].compare(0, 2, "--") == 0)
+            return fail("missing value for " + diagnosticWord(word) + "; use --KEY VALUE");
+        if (parsed.count(key->name)) return fail("duplicate key " + diagnosticWord(word));
+        if (key->scope == KeyScope::LaunchOnly && words[i + 1] != "1")
+            return fail("invalid value " + diagnosticWord(words[i + 1]) + " for " + diagnosticWord(word) + "; expected 1");
+        parsed.emplace(key->name, words[i + 1]);
+    }
+    args.swap(parsed);
+    return true;
+}
+
 // Process exit status, including negative and out-of-range returns, as observed by a shell.
 // In particular -1 -> 255, 256 -> 0, and 257 -> 1. -1 is never a wire status.
 inline int doneStatus(int main_return) { return static_cast<unsigned int>(main_return) & 0xffu; }

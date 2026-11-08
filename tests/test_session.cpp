@@ -221,7 +221,84 @@ static set<string> files(const string& folder)
     return names;
 }
 
-static vector<FrameTiming> outputs(const string& folder, int count, int dimension = 32, bool reference = false, int cv_type = CV_8UC1)
+static string stdoutText(Child& child)
+{
+    string result;
+    while (!child.eof) {
+        child.readMore();
+        while (!child.lines.empty()) { result += child.lines.front() + '\n'; child.lines.pop_front(); }
+    }
+    return result;
+}
+
+static void argumentSafety(Scratch& scratch)
+{
+    const string explicit_folder = scratch.directory("argument-safety");
+    const string default_sentinel = scratch.path + "/default/i777.pgm";
+    const string explicit_sentinel = explicit_folder + "/i777.pgm";
+    put(default_sentinel, "default untouched"); put(explicit_sentinel, "explicit untouched");
+    const vector<vector<string>> helps = {{"--help"}, {"-h"}, {"--NB_HOLO", "3", "--help"},
+        {"--CHEMIN_ACQUIS", explicit_folder, "--NB_HOLO", "3", "--help"},
+        {"--CHEMIN_ACQUIS", "-h"}, {"bare", "--SESSION", "0", "--help"}, {"--SESSION", "1", "--help"}};
+    int index = 0;
+    auto untouched = [&](const Child& child) {
+        require(contents(child.audit).empty(), "argument handling wrote the DAC");
+        require(contents(default_sentinel) == "default untouched" && contents(explicit_sentinel) == "explicit untouched",
+                "argument handling cleared an output folder");
+        require(files(scratch.path + "/default") == set<string>{"i777.pgm"} &&
+                files(explicit_folder) == set<string>{"i777.pgm"}, "argument handling wrote output files");
+    };
+    for (const auto& words : helps) {
+        Child child(scratch, "help-" + to_string(index++), words);
+        const string output = stdoutText(child);
+        require(child.wait() == 0 && output.find("Usage") != string::npos, "help did not exit 0 with usage");
+        for (const auto& key : acquisition_protocol::argumentKeys())
+            require(output.find(std::string("--") + key.name) != string::npos, "help omitted a table key");
+        require(output.find("Reading paths") == string::npos && contents(child.log).empty(), "help read configuration");
+        untouched(child);
+    }
+    struct BadLaunch { vector<string> words; string bad; bool session; };
+    const vector<BadLaunch> bad_launches = {
+        {{"--NB_HOLO"}, "--NB_HOLO", false},
+        {{"bare"}, "bare", false}, {{"-x", "1"}, "-x", false},
+        {{"--CHEMIN_ACQUIS", "--NB_HOLO", "3"}, "--CHEMIN_ACQUIS", false},
+        {{"--FOO", "1"}, "--FOO", false}, {{"--NB_HOLO=3"}, "--NB_HOLO=3", false},
+        {{"--NB_HOLO", "3", "--NB_HOLO", "4"}, "--NB_HOLO", false},
+        {{"--SESSION", "0"}, "0", false},
+        {{"--SESSION", "1", "--DIM_ROI", "32", "--NB_HOLO", "3"}, "--NB_HOLO", true},
+        {{"--SESSION", "1", "--CAMERA_ID"}, "--CAMERA_ID", true},
+        {{"--CHEMIN_ACQUIS", explicit_folder, "--NB_HOLO"}, "--NB_HOLO", false}
+    };
+    for (const auto& test : bad_launches) {
+        Child child(scratch, "bad-argument-" + to_string(index++), test.words);
+        const string output = stdoutText(child);
+        require(child.wait() == 2, "invalid launch did not exit 2 before startup");
+        const string error = contents(child.log);
+        const string valid = "valid keys: " + acquisition_protocol::validKeys(acquisition_protocol::ArgumentOrigin::Launch, test.session);
+        require(error.find("tdm_acquisition: ") == 0 && error.find(test.bad) != string::npos &&
+                error.find(valid) != string::npos &&
+                error.find("(--help lists the keys)") != string::npos, "usage error omitted bad word, valid keys or hint");
+        if (test.session) {
+            // The GUI's session client reads only stdout: exactly one ERROR reply, the same error as stderr.
+            acquisition_protocol::Reply reply;
+            string reply_error;
+            require(count(output.begin(), output.end(), '\n') == 1 &&
+                    acquisition_protocol::parseReply(output.substr(0, output.size() - 1), reply, reply_error) &&
+                    reply.keyword == "ERROR" && reply.values.size() == 1 && reply.values.count("message"),
+                    "session usage error did not reply one ERROR on stdout: " + output);
+            const string& message = reply.values.at("message");
+            require(message.find(test.bad) != string::npos && message.find(valid) != string::npos &&
+                    error.find("tdm_acquisition: " + message + " (--help lists the keys)") == 0,
+                    "session usage ERROR omitted the bad word or valid keys: " + message);
+        } else
+            require(output.empty(), "one-shot usage error wrote to stdout: " + output);
+        untouched(child);
+    }
+}
+
+// Every entry of the folder must be an expected output (a regular file) or one of the entries the test seeded there.
+static vector<FrameTiming> outputs(const string& folder, int count, int dimension = 32, bool reference = false,
+                                   int cv_type = CV_8UC1, const set<string>& seeded = {})
 {
     set<string> expected = {"fsm_frame_commands.csv", "frame_timing.csv", "frame_timing_summary.json"};
     for (int k = 0; k < count; ++k) {
@@ -231,7 +308,12 @@ static vector<FrameTiming> outputs(const string& folder, int count, int dimensio
         require(!image.empty() && image.rows == dimension && image.cols == dimension && image.type() == cv_type, "wrong frame geometry: " + name);
     }
     if (reference) expected.insert("Intensite_ref.pgm");
-    require(files(folder) == expected, "unexpected file list in " + folder);
+    for (const string& name : expected) {
+        struct stat info;
+        require(lstat((folder + "/" + name).c_str(), &info) == 0 && S_ISREG(info.st_mode), "missing output " + name + " in " + folder);
+    }
+    for (const string& name : files(folder))
+        require(expected.count(name) || seeded.count(name), "unexpected entry " + name + " in " + folder);
     vector<FrameTiming> rows;
     string error;
     int settle;
@@ -278,7 +360,8 @@ static void protocolRuns(Scratch& scratch, const string& identity, double expect
     require(poll(&fd, 1, 40) == 0 && exists(first + "/sentinel"), "partial command was executed");
     child.sendRaw(command.substr(command.size()/2) + "\r\n");
     done(child, 0, 3);
-    const auto first_rows = outputs(first, 3);
+    const auto first_rows = outputs(first, 3, 32, false, CV_8UC1, {"sentinel"});
+    require(contents(first + "/sentinel") == "keep until RUN", "successful RUN removed the user's sentinel");
     // Every geometry/format mismatch is refused before clearing or any DAC write (including parks).
     for (const auto& mismatch : vector<pair<string,string>>{{"DIM_ROI", "16"}, {"DIM_ROI", "-1"}, {"OFFSET_ROI_X", "1"},
             {"OFFSET_ROI_Y", "1"}, {"PIXEL_FORMAT", "Mono16"}}) {
@@ -291,6 +374,19 @@ static void protocolRuns(Scratch& scratch, const string& identity, double expect
     }
     child.sendRaw("\"unterminated\nUNKNOWN\nRUN --NB_HOLO\nQUIT extra\n");
     for (int i = 0; i < 4; ++i) child.reply("ERROR");
+    for (const auto& bad : vector<pair<vector<string>, string>>{
+            {{"RUN", "--FOO", "1"}, "--FOO"},
+            {{"RUN", "--NB_HOLO", "3", "--NB_HOLO", "4"}, "--NB_HOLO"},
+            {{"RUN", "--SESSION", "1"}, "--SESSION"}}) {
+        const string before = contents(child.audit);
+        child.send(bad.first);
+        const string message = child.reply("ERROR").values.at("message");
+        require(message.find(bad.second) != string::npos &&
+                message.find("valid keys: " + acquisition_protocol::validKeys(acquisition_protocol::ArgumentOrigin::Run)) != string::npos,
+                "RUN argument error omitted bad word or valid keys");
+        require(contents(child.audit) == before && files(second) == set<string>{"sentinel"},
+                "malformed RUN touched files or hardware");
+    }
     // Queue exposure, another RUN and QUIT during a RUN. Replies must retain command order.
     child.send(run(second, 4, 20));
     child.send({"EXPOSURE", "2000.75"});
@@ -303,7 +399,8 @@ static void protocolRuns(Scratch& scratch, const string& identity, double expect
     done(child, 0, 2);
     child.reply("BYE"); child.expectEof();
     require(child.wait() == 0, "QUIT exit was nonzero"); child.cleaned();
-    const auto second_rows = outputs(second, 4);
+    const auto second_rows = outputs(second, 4, 32, false, CV_8UC1, {"sentinel"});
+    require(contents(second + "/sentinel") == "untouched", "queued RUN removed the user's sentinel");
     outputs(third, 2, 32, true);
     require(first_rows.back().frame_id != second_rows.front().frame_id, "buffer crossed RUN boundaries");
 }
@@ -356,7 +453,8 @@ static void deferredRunConfig(Scratch& scratch, const string& identity)
         child.send(command); done(child, 0, 3);
         child.send({"QUIT"}); child.reply("BYE"); child.expectEof();
         require(child.wait() == 0, "overridden RUN poisoned the session"); child.cleaned();
-        outputs(folder, 3);
+        outputs(folder, 3, 32, false, CV_8UC1, {"sentinel"});
+        require(contents(folder + "/sentinel") == "untouched", "overridden RUN removed the user's sentinel");
     }
     scratch.writeConfig(false);
 }
@@ -376,7 +474,8 @@ static void randomPolarStops(Scratch& scratch, const string& identity)
     Child child(scratch, "random-polar-limit", launch(identity));
     child.reply("HELLO");
     auto command = run(folder, 64);
-    command.insert(command.end(), {"--SCAN_PATTERN", "RANDOM_POLAR", "--NXMAX", "4"});
+    command[4] = "4"; // Replace run()'s NXMAX rather than providing a duplicate key.
+    command.insert(command.end(), {"--SCAN_PATTERN", "RANDOM_POLAR"});
     const string before = contents(child.audit);
     child.send(command);
     const auto reply = child.reply("DONE");
@@ -533,35 +632,116 @@ static void cliClearRefusal(Scratch& scratch, const string& folder, const string
     require(contents(child.audit).empty(), "CLI opened/moved hardware after a failed clear");
 }
 
+static void cleanupPreservation(Scratch& scratch, const string& identity)
+{
+    for (bool session : {false, true}) {
+        const string name = session ? "session-cleanup" : "cli-cleanup", folder = scratch.directory(name);
+        const vector<string> stale = {"i007.pgm", "i0000.pgm", "Intensite_ref.pgm", "frame_timing.csv",
+            "frame_timing_summary.json", "fsm_frame_commands.csv", "fsm_frame_commands.csv.tmp",
+            "fsm_schedule.csv", "fsm_schedule.csv.tmp"};
+        for (const string& file : stale) put(folder + "/" + file, "stale");
+        set<string> kept = {"notes.txt", "Mask.png", ".hidden", "i01.pgm", "i000.pgm.bak",
+            "acquisition.conf", "processing.conf", "config/", "user-link"};
+        for (const string& file : {"notes.txt", "Mask.png", ".hidden", "i01.pgm", "i000.pgm.bak",
+                "acquisition.conf", "processing.conf"}) put(folder + "/" + file, "user content");
+        require(mkdir((folder + "/config").c_str(), 0700) == 0, "cannot make preserved directory");
+        put(folder + "/config/inside", "nested content");
+        const string target = scratch.path + "/" + name + "-target";
+        put(target, "outside target");
+        require(symlink(target.c_str(), (folder + "/i009.pgm").c_str()) == 0, "cannot create own-output symlink");
+        require(symlink("notes.txt", (folder + "/user-link").c_str()) == 0, "cannot create user symlink");
+        require(symlink("missing-target", (folder + "/i011.pgm").c_str()) == 0, "cannot create dangling own-output symlink");
+        // Exercise warning sorting and the limit without hiding any of the named user entries above.
+        for (int k = 0; k < 25; ++k) {
+            const string file = cv::format("z-user-%02d", k);
+            put(folder + "/" + file, "user content"); kept.insert(file);
+        }
+        auto args = run(folder); args.erase(args.begin());
+        Child child(scratch, name, session ? launch(identity) : args);
+        if (session) {
+            child.reply("HELLO"); child.send(run(folder)); done(child, 0, 3);
+            child.send({"QUIT"}); child.reply("BYE"); child.expectEof();
+        } else stdoutText(child);
+        require(child.wait() == 0, "cleanup preservation run failed: " + contents(child.log)); child.cleaned();
+        set<string> seeded;
+        for (const string& entry : kept) seeded.insert(entry.back() == '/' ? entry.substr(0, entry.size() - 1) : entry);
+        outputs(folder, 3, 32, false, CV_8UC1, seeded);
+        for (const string& file : {"i007.pgm", "i0000.pgm", "Intensite_ref.pgm", "fsm_frame_commands.csv.tmp",
+                "fsm_schedule.csv", "fsm_schedule.csv.tmp", "i009.pgm", "i011.pgm"}) {
+            struct stat info;
+            require(lstat((folder + "/" + file).c_str(), &info) != 0 && errno == ENOENT, "stale output survived: " + file);
+        }
+        require(contents(target) == "outside target", "cleanup followed an own-output symlink");
+        for (const string& entry : kept) {
+            const string path = folder + "/" + entry;
+            struct stat info;
+            require(lstat(path.c_str(), &info) == 0, "user entry disappeared: " + entry);
+            if (entry.back() == '/') require(contents(path + "inside") == "nested content", "nested user file changed");
+            else require(contents(path) == "user content", "user file changed: " + entry);
+        }
+        const string log = contents(child.log), prefix = "Warning: kept entries in \"" + folder + "\": ";
+        string expected = prefix;
+        size_t count = 0;
+        for (const string& entry : kept) {
+            if (count == 20) break;
+            if (count++) expected += ", ";
+            expected += '"' + entry + '"';
+        }
+        expected += ", ... and " + to_string(kept.size() - 20) + " more\n";
+        const size_t position = log.find(expected);
+        require(position != string::npos && log.find(prefix, position + expected.size()) == string::npos,
+                "kept-entry warning was missing, unsorted, repeated or unbounded: " + log);
+    }
+}
+
 static void clearRefusals(Scratch& scratch, const string& identity)
 {
-    const string blocked = scratch.directory("failed-removal"), valid = scratch.directory("after-clear-refusal");
-    require(mkdir((blocked + "/nonempty").c_str(), 0700) == 0, "cannot create removal failure");
-    put(blocked + "/nonempty/sentinel", "untouched");
+    const string valid = scratch.directory("after-clear-refusal");
     Child child(scratch, "clear-refusal", launch(identity));
     child.reply("HELLO");
-    auto refused = [&](const string& folder) {
+    auto refused = [&](const string& folder, const string& reason) {
         const string before = contents(child.audit);
         child.send(run(folder));
         const auto reply = child.reply("DONE");
         require(reply.values.at("status") == "1" && reply.values.at("frames") == "0" &&
-                reply.values.at("error").find(folder) != string::npos, "failed clear lacked DONE status 1/folder error");
+                reply.values.at("error").find(folder) != string::npos &&
+                reply.values.at("error").find(reason) != string::npos, "failed clear lacked DONE status 1/folder/reason");
         require(contents(child.audit) == before, "failed clear moved hardware");
     };
-    child.send(run(blocked)); done(child, 0, 3);
-    require(contents(blocked + "/nonempty/sentinel") == "untouched" && exists(blocked + "/i002.pgm") &&
-            contents(child.log).find("Warning: cannot remove " + blocked + "/nonempty") != string::npos,
-            "failed removal did not warn, keep the subdirectory and continue the RUN");
-    auto args = run(blocked); args.erase(args.begin());
-    {
-        Child cli(scratch, "cli-failed-removal", args);
-        while (!cli.eof) { cli.readMore(); cli.lines.clear(); }
-        require(cli.wait() == 0, "CLI did not continue after a failed removal"); cli.cleaned();
-        require(contents(blocked + "/nonempty/sentinel") == "untouched" && exists(blocked + "/i002.pgm") &&
-                contents(cli.log).find("Warning: cannot remove " + blocked + "/nonempty") != string::npos,
-                "CLI failed removal did not preserve the subdirectory and warn");
+    for (const string& archived : {"i000.jxl", "i003.png"}) {
+        const string folder = scratch.directory("archived-" + archived);
+        put(folder + "/" + archived, "archived frame");
+        put(folder + "/i000.pgm", "earlier frame"); // Sorts before the PNG; must not be removed first.
+        put(folder + "/frame_timing.csv", "earlier timing");
+        refused(folder, '"' + archived + "\"; choose an empty folder");
+        cliClearRefusal(scratch, folder, "cli-archived-" + archived);
+        require(contents(folder + "/" + archived) == "archived frame" &&
+                contents(folder + "/i000.pgm") == "earlier frame" &&
+                contents(folder + "/frame_timing.csv") == "earlier timing" && files(folder).size() == 3,
+                "archive refusal deleted or wrote files");
     }
-    refused(scratch.path + "/missing-folder");
+    // An own-output name that is not a regular file or symlink would be written by the run: refused, nothing deleted.
+    for (const string& blocker : {"i008.pgm", "i010.pgm", "frame_timing.csv"}) {
+        const string folder = scratch.directory("not-regular-" + blocker);
+        put(folder + "/i000.pgm", "earlier frame"); // Sorts first and is deletable; must survive the refusal.
+        put(folder + "/notes.txt", "user content");
+        const bool directory = blocker == "i008.pgm";
+        if (directory) {
+            require(mkdir((folder + "/" + blocker).c_str(), 0700) == 0, "cannot make own-output directory");
+            put(folder + "/" + blocker + "/inside", "nested content");
+        } else require(mkfifo((folder + "/" + blocker).c_str(), 0600) == 0, "cannot create own-output FIFO");
+        refused(folder, "own output name \"" + blocker + "\" is not a regular file; choose an empty folder");
+        cliClearRefusal(scratch, folder, "cli-not-regular-" + blocker);
+        struct stat info;
+        require(lstat((folder + "/" + blocker).c_str(), &info) == 0 &&
+                (directory ? S_ISDIR(info.st_mode) && contents(folder + "/" + blocker + "/inside") == "nested content"
+                           : S_ISFIFO(info.st_mode)) &&
+                contents(folder + "/i000.pgm") == "earlier frame" && contents(folder + "/notes.txt") == "user content" &&
+                files(folder).size() == 3, "not-regular own-output refusal deleted or wrote entries");
+        require(contents(scratch.path + "/cli-not-regular-" + blocker + ".log").find("Warning: kept entries") == string::npos,
+                "a refused cleanup printed a partial kept-entry warning");
+    }
+    refused(scratch.path + "/missing-folder", "opendir");
     cliClearRefusal(scratch, scratch.path + "/missing-folder", "cli-missing-folder");
     if (geteuid() != 0) {
         const string unreadable = scratch.directory("unreadable");
@@ -572,12 +752,25 @@ static void clearRefusals(Scratch& scratch, const string& identity)
                 ~RestoreMode() { chmod(path.c_str(), 0700); }
             } restore{unreadable};
             require(chmod(unreadable.c_str(), 0) == 0, "cannot make folder unreadable");
-            refused(unreadable);
+            refused(unreadable, "opendir");
             cliClearRefusal(scratch, unreadable, "cli-unreadable");
         }
         require(contents(unreadable + "/sentinel") == "untouched", "unreadable folder was cleared");
+        const string blocked = scratch.directory("failed-removal");
+        put(blocked + "/i007.pgm", "stale frame");
+        {
+            struct RestoreMode {
+                const string& path;
+                ~RestoreMode() { chmod(path.c_str(), 0700); }
+            } restore{blocked};
+            require(chmod(blocked.c_str(), 0500) == 0, "cannot make folder unwritable");
+            refused(blocked, "i007.pgm");
+            cliClearRefusal(scratch, blocked, "cli-failed-removal");
+        }
+        require(contents(blocked + "/i007.pgm") == "stale frame" && files(blocked).size() == 1,
+                "failed unlink continued the run");
     } else {
-        cout << "SKIP assertion: root can read mode-0 folders; removal-failure checks still run.\n";
+        cout << "SKIP assertion: root bypasses folder permission checks.\n";
     }
     // A folder-open failure leaves the connection usable for a successful RUN and normal cleanup.
     child.send(run(valid)); done(child, 0, 3);
@@ -671,6 +864,7 @@ int main()
         setenv("XDG_CONFIG_HOME", (scratch.path + "/.config").c_str(), 1);
         setenv("XDG_CACHE_HOME", (scratch.path + "/cache").c_str(), 1);
         setenv("XDG_DATA_HOME", (scratch.path + "/data").c_str(), 1);
+        argumentSafety(scratch);
         bool has_fake = false;
         for (unsigned int i = 0; i < arv_get_n_interfaces(); ++i)
             has_fake = has_fake || string(arv_get_interface_id(i)) == "Fake";
@@ -695,6 +889,7 @@ int main()
         cliPromptStop(scratch);
         eofAfterRun(scratch, identity);
         clearRefusals(scratch, identity);
+        cleanupPreservation(scratch, identity);
         failedRun(scratch, identity);
         idleEof(scratch, identity, false);
         idleEof(scratch, identity, true);

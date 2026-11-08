@@ -16,8 +16,6 @@ using namespace std;
 
 #include "projet.h"
 
-map<string, string> parse_args(int argc, char *argv[]);
-
 // If neither name exists, keep the legacy path and its existing reader diagnostics.
 bool resolve_config_path(const string& config_dir, const string& canonical_name,
                          const string& legacy_name, string& resolved_path,
@@ -44,7 +42,10 @@ bool resolve_nxmax(const string& file_path, const map<string, string>& overrides
 // The file AMPLI_REF is read from: the acquisition config when it is CONFIG_SCHEMA 3 (AMPLI_REF lives only there),
 // else the processing config as before (schemas 1 and 2 carry it in both files).
 string ampli_ref_config_path(const string& acquisition_path, const string& processing_path);
-// Clear entries except the two live configs. Returns 0 on success, 1 on any open/read/remove/close
-// failure, with error naming the acquisition folder and the failed operation. May partially clear.
-int clear_acquisition(string rep, string chemin_config_manip, string chemin_recon, string& error);
+bool is_acquisition_output(const string& name);
+// Read the whole listing before deleting only regular files/symlinks with own-output names.
+// Archived frames and own-output names that are not regular files/symlinks refuse without deletions.
+// Other entries are returned sorted (directories end in '/').
+// Returns 1 on open/read/close/inspect/unlink failure, naming the folder/entry. Unlink may partially clear.
+int clear_acquisition(const string& rep, vector<string>& left, string& error);
 #endif
