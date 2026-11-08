@@ -705,6 +705,21 @@ static void cleanupPreservation(Scratch& scratch, const string& identity)
         require(position != string::npos && log.find(prefix, position + expected.size()) == string::npos,
                 "kept-entry warning was missing, unsorted, repeated or unbounded: " + log);
     }
+    // CHEMIN_ACQUIS through a symlink: the cleanup works in the target folder and keeps its user files.
+    const string target = scratch.directory("linked-cleanup-target"), link = scratch.path + "/linked-cleanup";
+    require(symlink(target.c_str(), link.c_str()) == 0, "cannot create folder symlink");
+    for (const string& file : {"i007.pgm", "frame_timing.csv"}) put(target + "/" + file, "stale");
+    put(target + "/notes.txt", "user content");
+    auto args = run(link); args.erase(args.begin());
+    Child child(scratch, "linked-cleanup", args);
+    stdoutText(child);
+    require(child.wait() == 0, "cleanup through a folder symlink failed: " + contents(child.log)); child.cleaned();
+    outputs(target, 3, 32, false, CV_8UC1, {"notes.txt"});
+    struct stat info;
+    require(lstat((target + "/i007.pgm").c_str(), &info) != 0 && errno == ENOENT,
+            "stale output survived behind the symlink");
+    require(contents(target + "/notes.txt") == "user content" && lstat(link.c_str(), &info) == 0 &&
+            S_ISLNK(info.st_mode), "cleanup through a folder symlink changed a user file or the link");
 }
 
 static void clearRefusals(Scratch& scratch, const string& identity)

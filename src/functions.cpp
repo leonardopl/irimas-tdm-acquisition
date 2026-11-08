@@ -8,6 +8,7 @@
 #include <climits>
 #include <cmath>
 #include <iomanip>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #define PI 3.14159
@@ -189,9 +190,26 @@ int clear_acquisition(const string& rep, vector<string>& left, string& error)
         error = "Cannot clear acquisition directory " + acquisition_protocol::diagnosticWord(rep) +
                 ": " + operation + ": " + strerror(code);
     };
-    DIR* folder = opendir(rep.c_str());
-    if (!folder) {
+    // Every step goes through this one open directory: a retargeted symlink or a renamed folder cannot redirect the
+    // deletions to a folder whose listing was not checked.
+    struct Descriptor {
+        int fd;
+        ~Descriptor() { if (fd >= 0) close(fd); }
+    } dir{open(rep.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC)};
+    if (dir.fd < 0) {
         fail("opendir", errno);
+        return 1;
+    }
+    // fdopendir owns the duplicate; closedir closes it and leaves dir.fd open.
+    const int listing = fcntl(dir.fd, F_DUPFD_CLOEXEC, 0);
+    if (listing < 0) {
+        fail("dup", errno);
+        return 1;
+    }
+    DIR* folder = fdopendir(listing);
+    if (!folder) {
+        fail("fdopendir", errno);
+        close(listing);
         return 1;
     }
     vector<string> names;
@@ -221,7 +239,7 @@ int clear_acquisition(const string& rep, vector<string>& left, string& error)
     vector<string> outputs;
     for (const string& name : names) {
         struct stat info;
-        if (lstat((rep + "/" + name).c_str(), &info) != 0) {
+        if (fstatat(dir.fd, name.c_str(), &info, AT_SYMLINK_NOFOLLOW) != 0) {
             fail("lstat " + acquisition_protocol::diagnosticWord(name), errno);
             left.clear(); // A partial listing would read as the folder's kept entries; nothing was deleted.
             return 1;
@@ -241,7 +259,7 @@ int clear_acquisition(const string& rep, vector<string>& left, string& error)
     }
     sort(left.begin(), left.end());
     for (const string& name : outputs) {
-        if (unlink((rep + "/" + name).c_str()) != 0) {
+        if (unlinkat(dir.fd, name.c_str(), 0) != 0) {
             fail("unlink " + acquisition_protocol::diagnosticWord(name), errno);
             return 1;
         }
