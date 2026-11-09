@@ -97,7 +97,7 @@ Acquisition parameters in `acquisition.conf` (or legacy `config_manip.txt`):
 | SCAN_PATTERN | Scan pattern name |
 | VXMIN/VXMAX/VYMIN/VYMAX | Mirror voltage range |
 | NA_COND_LIM | Condenser NA limit (0-1] |
-| FSM_SETTLE_MS | Delay between a DAC command and its software-triggered exposure. If omitted, the generated schedule uses 5 ms when every consecutive command step is at most 0.75 V and 95 % of them at most 0.5 V, 10 ms up to 6.1 V, otherwise 100 ms. |
+| FSM_SETTLE_MS | Delay between a DAC command and its software-triggered exposure. If omitted, the generated schedule uses 5 ms when every consecutive command step is at most 0.75 V and 95 % of them at most 0.5 V, 10 ms up to 1.0 V, otherwise 100 ms. |
 | FSM_OVERLAP | 0 (default): sequential acquisition; 1: overlap the next mirror move and previous image write with the current frame transfer. Other values are errors. |
 | FSM_OVERLAP_MARGIN_US | Exposure guard added before the next mirror move, in microseconds (default 500; integer range 0-100000). |
 | SCAN_SEED | Optional unsigned seed used to reproduce RANDOM_POLAR schedules |
@@ -131,11 +131,17 @@ Before capture, the program writes `fsm_frame_commands.csv` beside the images.
 It contains one row per image (`i000` is the centre) and is the authoritative
 record of normalized scan coordinates and commanded DAC voltages. Holograms are
 software-triggered only after the corresponding DAC command has settled.
-The automatic settle comes from a rig series (same bead at 5/10/100/300 ms,
-2026-10-28): 5 ms matched 300 ms on a 400-frame `UNIFORM3D` scan (95 % of the
-steps 0.40-0.46 V, at most 0.73 V), and 10 ms matched 300 ms on `FERMAT` (jumps up
-to 6.1 V), where 5 ms left about 5 % of each jump of 1 V or more. Steps beyond 6.1 V were not tested and keep 100 ms; the
-`(0, 8 V)` intensity-reference move is included when enabled.
+The automatic settle comes from a rig series on one bead (2026-10-28):
+5 ms matched 300 ms on `UNIFORM3D` (p95 0.40-0.46 V, max 0.73 V);
+`FERMAT` needed 10 ms for the mean position (5 ms left about 5 % of jumps
+of 1 V or more). A rig check of two blank-field runs at the same place
+(2026-11-08) tested repetition frame for frame: the small steps of `UNIFORM3D`
+and ring `FERMAT` repeated much better at 5/10 ms (f_nc 0.07-0.09 against
+0.013 settled), but larger random jumps up to
+5.9 V did not at 5-70 ms; 100 ms repeated on all tested steps, at a cost of
+about 8x per frame. The 10 ms tier ends at 1.0 V (0.80-1.0 V extrapolates
+from the smooth-scan controls). Larger steps use 100 ms, including the
+unmeasured `(0, 8 V)` intensity-reference move when enabled.
 An explicit `FSM_SETTLE_MS` always overrides this selection.
 
 With `FSM_OVERLAP=0` (or unset), each frame keeps the sequential order: DAC A+B,

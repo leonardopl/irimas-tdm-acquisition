@@ -15,14 +15,19 @@ namespace {
 
 const double kNormalizedLimit = 10.0;
 const double kCommandLimit = 10.0;
-// Settle tiers measured on the rig (qwlsi-gui B185, 2026-10-28, same bead at 5/10/100/300 ms): 5 ms matched 300 ms
-// on UNIFORM3D (95 % of the steps 0.40-0.46 V, at most 0.73 V); on FERMAT jumps up to 6.1 V, 5 ms left ~5 % of each
-// jump of 1 V or more and 10 ms matched 300 ms; 0.5-1 V jumps were not resolved. Larger steps (the (0, 8 V)
-// intensity-reference move) were not tested and keep 100 ms. Same tiers as qwlsi-gui include/fsm_settle.h.
+// qwlsi-gui B185 / B228: B185 (2026-10-28), 5 ms matched 300 ms on UNIFORM3D (p95 0.40-0.46 V, max 0.73 V);
+// FERMAT needed 10 ms for mean position (5 ms left ~5 % of jumps >= 1 V). B228 (rig 2026-11-08): small-step
+// UNIFORM3D / ring FERMAT repeated much better at 5/10 ms (f_nc 0.07-0.09, settled floor 0.013); random jumps
+// <= 5.9 V did not at 5-70 ms (f_nc 0.35-0.48 at 10 ms), but did at 100 ms (f_nc <= 0.03). At pupil limits
+// VX -3.81..3.94 V, VY -2.77..2.62 V, ring FERMAT 400 max is 0.85/0.88 V at NA_COND_LIM 0.965/1; UNIFORM3D 200 max
+// is 0.98 V at 1. The 1.0 V limit keeps them at 10 ms with margin for recalibrated limits (0.80-1.0 V extrapolates
+// from smooth-scan controls). UNIFORM3D 400 stays at 5 ms; ROSACE / ANNULAR / STAR, FERMAT below ~375 and UNIFORM3D
+// below 200 frames use 100 ms, as does the unmeasured (0, 8 V) intensity-reference move.
+// Same tiers as qwlsi-gui include/fsm_settle.h.
 const double kSmallStepLimitVolts = 0.75;          // largest step
 const double kSmallTypicalStepLimitVolts = 0.5;    // 95th percentile of the steps
 const double kTypicalStepFraction = 0.95;
-const double kTestedStepLimitVolts = 6.1;
+const double kSettleStepLimitVolts = 1.0;
 const int kSmallStepSettleMilliseconds = 5;
 const int kSettleMilliseconds = 10;
 const int kConservativeSettleMilliseconds = 100;
@@ -250,7 +255,7 @@ int default_fsm_settle_ms(const std::vector<ScanFrameCommand>& commands)
     const double step = maximum_scan_command_step_volts(commands);
     const double typical = scan_command_step_volts_quantile(commands, kTypicalStepFraction);
     return step <= kSmallStepLimitVolts && typical <= kSmallTypicalStepLimitVolts ? kSmallStepSettleMilliseconds
-        : step <= kTestedStepLimitVolts ? kSettleMilliseconds
+        : step <= kSettleStepLimitVolts ? kSettleMilliseconds
         : kConservativeSettleMilliseconds;
 }
 

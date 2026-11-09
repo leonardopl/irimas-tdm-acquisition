@@ -416,12 +416,33 @@ int main(int argc, char* argv[])
     assert(scan_command_step_volts_quantile(std::vector<ScanFrameCommand>(), 0.95) == 0.0);
     settling_commands[2].command_vx_v = 1.2;    // 0.9 V
     assert(default_fsm_settle_ms(settling_commands) == 10);
+    settling_commands[2].command_vx_v = 1.3;    // exactly 1.0 V
+    assert(maximum_scan_command_step_volts(settling_commands) == 1.0);
+    assert(default_fsm_settle_ms(settling_commands) == 10);
+    settling_commands[2].command_vx_v = 1.3 + 1e-9;    // just above 1.0 V
+    assert(default_fsm_settle_ms(settling_commands) == 100);
+    settling_commands[2].command_vx_v = 6.3;    // 6.0 V, inside the former 10 ms tier
+    assert(default_fsm_settle_ms(settling_commands) == 100);
     settling_commands[2].command_vx_v = 0.3;    // the intensity-reference move (0, 8 V): untested size
     settling_commands[2].command_vy_v = 8.0;
     assert(default_fsm_settle_ms(settling_commands) == 100);
     settling_commands[2].command_vx_v = 0.6;
     settling_commands[2].command_vy_v = 0.4;
     assert(default_fsm_settle_ms(std::vector<ScanFrameCommand>()) == 100);
+
+    std::vector<ScanFrameCommand> generated_settling_commands;
+    // ROSACE starts with a large jump from the centre to its first point.
+    assert(build_scan_frame_commands(
+        "ROSACE", 400, Var2D{146, 146}, 4,
+        kVxmin, kVxmax, kVymin, kVymax, kNaCondLim, 1, generated_settling_commands, error));
+    assert(maximum_scan_command_step_volts(generated_settling_commands) > 1.0);
+    assert(default_fsm_settle_ms(generated_settling_commands) == 100);
+    // At the fixture limits, FERMAT 200 reaches about 1.26 V per step.
+    assert(build_scan_frame_commands(
+        "FERMAT", 200, Var2D{146, 146}, 4,
+        kVxmin, kVxmax, kVymin, kVymax, kNaCondLim, 1, generated_settling_commands, error));
+    assert(maximum_scan_command_step_volts(generated_settling_commands) > 1.0);
+    assert(default_fsm_settle_ms(generated_settling_commands) == 100);
 
     std::string text;
     assert(scan_frame_commands_csv(commands, text, error));
